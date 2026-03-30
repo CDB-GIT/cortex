@@ -606,6 +606,7 @@ export default {
     port: 'Port',
     host: 'Host',
     dbPath: 'DB Path',
+    configPath: 'Config File',
     walMode: 'WAL Mode',
     serverTimezone: 'Timezone',
     serverTime: 'Server Time',

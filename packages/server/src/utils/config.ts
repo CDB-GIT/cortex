@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const LLMProviderSchema = z.object({
   provider: z.enum(['openai', 'anthropic', 'google', 'gemini', 'deepseek', 'openrouter', 'ollama', 'none']),
@@ -174,19 +175,56 @@ export type CortexConfig = z.infer<typeof CortexConfigSchema>;
 let _config: CortexConfig | null = null;
 let _configFilePath: string | null = null;
 
+function findProjectRoot(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, '../../../../'),
+    path.resolve(here, '../../../'),
+    process.cwd(),
+  ];
+
+  for (const start of candidates) {
+    let current = start;
+    while (true) {
+      if (fs.existsSync(path.join(current, 'pnpm-workspace.yaml'))) return current;
+      const pkgPath = path.join(current, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+          if (pkg?.name === 'cortex' || pkg?.name === '@cortex/root') return current;
+        } catch {
+          // best effort
+        }
+      }
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+
+  return process.cwd();
+}
+
+function getDefaultConfigPaths(): string[] {
+  const projectRoot = findProjectRoot();
+  return [
+    path.join(projectRoot, 'cortex.json'),
+    path.join(projectRoot, 'cortex.config.json'),
+    path.join(process.env.HOME || '', '.config/cortex/config.json'),
+  ];
+}
+
 export function loadConfig(overrides?: Partial<CortexConfig>): CortexConfig {
   // 1. Try loading from config file
   let fileConfig: Record<string, unknown> = {};
-  // Prefer config inside DB directory (typically a Docker volume) so that
-  // Dashboard changes survive container restarts.  Fall back to CWD / home.
+  // Prefer an explicit DB-directory config when CORTEX_DB_PATH is set. Otherwise
+  // use the project-root config to avoid different CWDs creating shadow configs.
   const dbDir = process.env.CORTEX_DB_PATH
     ? path.resolve(path.dirname(process.env.CORTEX_DB_PATH))
     : null;
   const configPaths = [
     ...(dbDir ? [path.join(dbDir, 'cortex.json')] : []),
-    path.resolve('cortex.json'),
-    path.resolve('cortex.config.json'),
-    path.join(process.env.HOME || '', '.config/cortex/config.json'),
+    ...getDefaultConfigPaths(),
   ];
 
   for (const p of configPaths) {
@@ -229,6 +267,13 @@ export function getConfig(): CortexConfig {
     return loadConfig();
   }
   return _config;
+}
+
+export function getConfigFilePath(): string | null {
+  if (!_configFilePath) {
+    loadConfig();
+  }
+  return _configFilePath;
 }
 
 function deepMerge(target: any, source: any): any {

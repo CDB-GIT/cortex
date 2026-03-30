@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { getStats, getDb } from '../db/index.js';
-import { getConfig, updateConfig } from '../utils/config.js';
+import { getConfig, getConfigFilePath, updateConfig } from '../utils/config.js';
 import { restartLifecycleScheduler } from '../core/scheduler.js';
 import { createLogger, getLogLevel as _getLogLevel, setLogLevel as _setLogLevel, getLogBuffer } from '../utils/logger.js';
 import { metrics } from '../utils/metrics.js';
@@ -374,6 +374,7 @@ export function registerSystemRoutes(app: FastifyInstance, cortex: CortexApp): v
         time: new Date().toISOString(),
         timezone: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         uptime: Math.floor(process.uptime()),
+        configPath: getConfigFilePath(),
       },
       llm: {
         extraction: {
@@ -419,7 +420,7 @@ export function registerSystemRoutes(app: FastifyInstance, cortex: CortexApp): v
   app.patch('/api/v1/config', async (req) => {
     const body = req.body as any;
     const updated = updateConfig(body);
-    const reloaded = cortex.reloadProviders(updated);
+    const reloaded = await cortex.reloadProviders(updated);
     // Restart lifecycle scheduler if schedule changed
     if (body.lifecycle?.schedule !== undefined) {
       restartLifecycleScheduler(cortex);
@@ -499,6 +500,9 @@ export function registerSystemRoutes(app: FastifyInstance, cortex: CortexApp): v
 
   // Full reindex — rebuilds all vector embeddings
   app.post('/api/v1/reindex', async (req, reply) => {
+    // Re-initialize vector backend in case embedding dimensions changed since startup
+    await cortex.vectorBackend.initialize(cortex.embeddingProvider.dimensions || 1536);
+
     const db = getDb();
     const memories = db.prepare('SELECT id, content FROM memories WHERE superseded_by IS NULL').all() as Pick<Memory, 'id' | 'content'>[];
     const activeIds = new Set(memories.map(m => m.id));

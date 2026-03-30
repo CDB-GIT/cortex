@@ -606,6 +606,7 @@ export default {
     port: '端口',
     host: '主机',
     dbPath: '数据库路径',
+    configPath: '配置文件路径',
     walMode: 'WAL 模式',
     serverTimezone: '时区',
     serverTime: '服务器时间',

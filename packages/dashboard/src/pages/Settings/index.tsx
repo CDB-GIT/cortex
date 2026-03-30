@@ -1062,6 +1062,7 @@ export default function Settings() {
             <tr><td>{t('settings.port')}</td><td>{config.port}</td></tr>
             <tr><td>{t('settings.host')}</td><td>{config.host}</td></tr>
             <tr><td>{t('settings.dbPath')}</td><td>{config.storage?.dbPath}</td></tr>
+            {config.serverInfo?.configPath && <tr><td>{t('settings.configPath')}</td><td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'break-all' }}>{config.serverInfo.configPath}</td></tr>}
             <tr><td>{t('settings.walMode')}</td><td>{config.storage?.walMode ? t('common.on') : t('common.off')}</td></tr>
             {config.serverInfo && (
               <>
