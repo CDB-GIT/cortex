@@ -163,6 +163,7 @@ export function listMemories(opts: {
   layer?: MemoryLayer;
   category?: MemoryCategory;
   agent_id?: string;
+  audit_flag?: string;
   pairing_code?: string | null;
   limit?: number;
   offset?: number;
@@ -178,6 +179,10 @@ export function listMemories(opts: {
   if (opts.layer) { conditions.push('layer = ?'); params.push(opts.layer); }
   if (opts.category) { conditions.push('category = ?'); params.push(opts.category); }
   if (opts.agent_id) { conditions.push('(agent_id = ? OR agent_id IS NULL OR agent_id = \'\')'); params.push(opts.agent_id); }
+  if (opts.audit_flag) {
+    conditions.push("json_extract(metadata, '$.audit_flag') = ?");
+    params.push(opts.audit_flag);
+  }
   if (!opts.include_superseded) { conditions.push('superseded_by IS NULL'); }
   if (opts.has_versions) {
     // Memories that have been superseded OR that supersede others

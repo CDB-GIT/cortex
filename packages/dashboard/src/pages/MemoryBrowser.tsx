@@ -17,6 +17,7 @@ interface Memory {
   agent_id: string;
   source: string | null;
   superseded_by: string | null;
+  metadata?: string | null;
   is_pinned?: number;
 }
 
@@ -25,12 +26,36 @@ type SortDir = 'desc' | 'asc';
 
 const CATEGORIES = ['identity', 'preference', 'decision', 'fact', 'entity', 'correction', 'todo', 'context', 'summary', 'skill', 'relationship', 'goal', 'insight', 'project_state', 'constraint', 'policy', 'agent_self_improvement', 'agent_user_habit', 'agent_relationship', 'agent_persona'];
 
+const CATEGORY_LABELS: Record<string, string> = {
+  identity: '\u8eab\u4efd\u4fe1\u606f',
+  preference: '\u504f\u597d\u4e60\u60ef',
+  decision: '\u5173\u952e\u51b3\u7b56',
+  fact: '\u4e8b\u5b9e',
+  entity: '\u5b9e\u4f53',
+  correction: '\u7ea0\u6b63',
+  todo: '\u5f85\u529e/\u63d0\u9192',
+  context: '\u4e0a\u4e0b\u6587',
+  summary: '\u5386\u53f2\u6458\u8981',
+  skill: '\u6280\u80fd',
+  relationship: '\u5173\u7cfb',
+  goal: '\u76ee\u6807\u8ba1\u5212',
+  insight: '\u6d1e\u5bdf\u5fc3\u5f97',
+  project_state: '\u9879\u76ee\u72b6\u6001',
+  constraint: '\u7ea6\u675f',
+  policy: '\u7b56\u7565',
+  agent_self_improvement: 'Agent \u81ea\u6211\u6539\u8fdb',
+  agent_user_habit: 'Agent \u7528\u6237\u89c2\u5bdf',
+  agent_relationship: 'Agent \u5173\u7cfb\u52a8\u6001',
+  agent_persona: 'Agent \u4eba\u8bbe\u98ce\u683c',
+};
+
 export default function MemoryBrowser() {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [total, setTotal] = useState(0);
   const [layer, setLayer] = useState('');
   const [category, setCategory] = useState('');
   const [agentFilter, setAgentFilter] = useState('');
+  const [auditFilter, setAuditFilter] = useState('');
   const [agents, setAgents] = useState<any[]>([]);
   const [versionFilter, setVersionFilter] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -74,6 +99,14 @@ export default function MemoryBrowser() {
         if (layer) results = results.filter(m => m.layer === layer);
         if (category) results = results.filter(m => m.category === category);
         if (agentFilter) results = results.filter(m => m.agent_id === agentFilter);
+        if (auditFilter) {
+          results = results.filter((m: any) => {
+            try {
+              const meta = m.metadata ? JSON.parse(m.metadata) : {};
+              return meta.audit_flag === auditFilter;
+            } catch { return false; }
+          });
+        }
         // Default sort by score (desc) in search mode, unless user picked a different sort
         if (sortField === 'created_at' && sortDir === 'desc') {
           results.sort((a: any, b: any) => (b.finalScore ?? 0) - (a.finalScore ?? 0));
@@ -93,6 +126,7 @@ export default function MemoryBrowser() {
       if (layer) params.layer = layer;
       if (category) params.category = category;
       if (agentFilter) params.agent_id = agentFilter;
+      if (auditFilter) params.audit_flag = auditFilter;
       if (versionFilter === 'has_versions') {
         params.has_versions = 'true';
         params.include_superseded = 'true';
@@ -114,7 +148,7 @@ export default function MemoryBrowser() {
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layer, category, agentFilter, versionFilter, page, searchQuery, isSearchMode, sortField, sortDir]);
+  }, [layer, category, agentFilter, auditFilter, versionFilter, page, searchQuery, isSearchMode, sortField, sortDir]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { listAgents().then((res: any) => setAgents(res.agents || [])).catch(() => {}); }, []);
@@ -265,6 +299,15 @@ export default function MemoryBrowser() {
     return field;
   };
 
+  const getAuditFlag = (memory: Memory): string | null => {
+    try {
+      const meta = memory.metadata ? JSON.parse(memory.metadata) : {};
+      return typeof meta.audit_flag === 'string' ? meta.audit_flag : null;
+    } catch {
+      return null;
+    }
+  };
+
   return (
     <div>
       {/* Toast */}
@@ -315,11 +358,15 @@ export default function MemoryBrowser() {
         </select>
         <select value={category} onChange={e => { setCategory(e.target.value); setPage(0); }}>
           <option value="">{t('memories.allCategories')}</option>
-          {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+          {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
         </select>
         <select value={agentFilter} onChange={e => { setAgentFilter(e.target.value); setPage(0); }}>
           <option value="">{t('memories.allAgents')}</option>
           {agents.map((a: any) => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+        </select>
+        <select value={auditFilter} onChange={e => { setAuditFilter(e.target.value); setPage(0); }}>
+          <option value="">{t('memories.allAuditStates') || '全部审计状态'}</option>
+          <option value="possible_conflict">{t('memories.auditPossibleConflict') || '可能冲突'}</option>
         </select>
         <select value={versionFilter} onChange={e => { setVersionFilter(e.target.value); setPage(0); }}>
           <option value="">{t('memories.allMemories')}</option>
@@ -371,7 +418,7 @@ export default function MemoryBrowser() {
           </select>
           {bulkAction === 'category' && (
             <select value={bulkCategory} onChange={e => setBulkCategory(e.target.value)} style={{ width: 'auto' }}>
-              {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
             </select>
           )}
           {bulkAction && (
@@ -395,6 +442,9 @@ export default function MemoryBrowser() {
           </div>
           {memories.map(m => (
             <div key={m.id} className="memory-card" data-layer={m.layer} style={{ borderColor: selected.has(m.id) ? 'var(--color-primary)' : undefined }}>
+              {(() => {
+                const auditFlag = getAuditFlag(m);
+                return (
               <div className="header">
                 <input
                   type="checkbox"
@@ -405,6 +455,11 @@ export default function MemoryBrowser() {
                 <span className={`badge ${m.layer}`}>{m.layer}</span>
                 <span className="badge" style={{ background: 'var(--color-info-muted)', color: '#60a5fa' }}>{m.category}</span>
                 {m.is_pinned ? <span className="badge" style={{ background: 'rgba(255,170,0,0.2)', color: '#b8860b' }}>{t('memoryDetail.pinned')}</span> : null}
+                {auditFlag === 'possible_conflict' ? (
+                  <span className="badge" style={{ background: 'rgba(244,114,182,0.18)', color: '#db2777' }}>
+                    {t('memories.auditPossibleConflict') || '可能冲突'}
+                  </span>
+                ) : null}
                 {isSearchMode && scoreMap[m.id] !== undefined && (
                   <span className={`score-pill ${scoreMap[m.id]! > 0.3 ? 'high' : scoreMap[m.id]! > 0.1 ? 'medium' : 'low'}`}>
                     {scoreMap[m.id]!.toFixed(3)}
@@ -412,6 +467,8 @@ export default function MemoryBrowser() {
                 )}
                 <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-tertiary)' }}>{toLocal(m.created_at, 'short')}</span>
               </div>
+                );
+              })()}
               <div className="content">{m.content}</div>
               <div className="meta">
                 <span>{t('memories.imp')}: {m.importance?.toFixed(2)}</span>
@@ -477,7 +534,7 @@ export default function MemoryBrowser() {
             <div className="form-group">
               <label>{t('memories.category')}</label>
               <select value={editing.category} onChange={e => setEditing({ ...editing, category: e.target.value })}>
-                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
               </select>
             </div>
             <div className="form-group">
@@ -512,7 +569,7 @@ export default function MemoryBrowser() {
             <div className="form-group">
               <label>{t('memories.category')}</label>
               <select value={newMem.category} onChange={e => setNewMem({ ...newMem, category: e.target.value })}>
-                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
               </select>
             </div>
             <div className="form-group">

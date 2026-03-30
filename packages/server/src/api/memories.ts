@@ -10,6 +10,7 @@ export function registerMemoriesRoutes(app: FastifyInstance, cortex: CortexApp):
       layer: q.layer,
       category: q.category,
       agent_id: q.agent_id,
+      audit_flag: q.audit_flag,
       limit: q.limit ? parseInt(q.limit) : undefined,
       offset: q.offset ? parseInt(q.offset) : undefined,
       orderBy: q.order_by,
