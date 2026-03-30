@@ -52,6 +52,11 @@ export default function LifecycleSection({
             1,
             20,
           )}
+          {renderToggleField(
+            t('settings.preferenceDuplicateAuditEnabled'),
+            t('settings.preferenceDuplicateAuditEnabledDesc'),
+            'preferenceExtraction.duplicateAuditEnabled',
+          )}
           {renderSlider(
             t('settings.promotionThreshold'),
             t('settings.promotionThresholdDesc'),
@@ -77,6 +82,7 @@ export default function LifecycleSection({
             {displayRow(t('settings.contradictionAuditLowConfidenceThreshold'), (config.lifecycle?.contradictionAudit?.lowConfidenceThreshold ?? 0.4).toFixed(2), t('settings.contradictionAuditLowConfidenceThresholdDesc'))}
             {displayRow(t('settings.preferenceExtractionEnabled'), config.lifecycle?.preferenceExtraction?.enabled ? t('common.on') : t('common.off'), t('settings.preferenceExtractionEnabledDesc'))}
             {displayRow(t('settings.preferenceExtractionMaxNew'), config.lifecycle?.preferenceExtraction?.maxNewPreferences ?? 5, t('settings.preferenceExtractionMaxNewDesc'))}
+            {displayRow(t('settings.preferenceDuplicateAuditEnabled'), config.lifecycle?.preferenceExtraction?.duplicateAuditEnabled ? t('common.on') : t('common.off'), t('settings.preferenceDuplicateAuditEnabledDesc'))}
             {displayRow(t('settings.promotionThreshold'), config.lifecycle?.promotionThreshold?.toFixed(2), t('settings.promotionThresholdDesc'))}
             {displayRow(t('settings.archiveThreshold'), config.lifecycle?.archiveThreshold?.toFixed(2), t('settings.archiveThresholdDesc'))}
             {displayRow(t('settings.decayLambda'), config.lifecycle?.decayLambda?.toFixed(3), t('settings.decayLambdaDesc'))}

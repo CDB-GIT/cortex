@@ -51,6 +51,7 @@ export interface AffectedMemory {
 export interface LifecycleReport {
   promoted: number;
   preferencesExtracted?: number;
+  preferenceDuplicatesFlagged?: number;
   merged: number;
   archived: number;
   compressedToCore: number;
@@ -98,6 +99,41 @@ export interface LifecycleCategoryStat {
   maxDecayScore: number;
 }
 
+export interface LifecyclePreferenceRecentItem {
+  id: string;
+  content: string;
+  confidence: number;
+  createdAt: string;
+  sourceMemoryCount: number;
+  missingSourceMemoryCount: number;
+  duplicateCount: number;
+}
+
+export interface LifecyclePreferenceDuplicateSample {
+  content: string;
+  count: number;
+  memoryIds: string[];
+}
+
+export interface LifecyclePreferenceStats {
+  enabled: boolean;
+  recentWindowDays: number;
+  thresholds: {
+    dedupSimilarity: number;
+    lowConfidenceThreshold: number;
+  };
+  totalPreferences: number;
+  lifecycleExtractedTotal: number;
+  recentExtracted: number;
+  lowConfidenceRecent: number;
+  missingSourceRecent: number;
+  duplicateGroups: number;
+  duplicatePreferences: number;
+  averageSourceMemories: number;
+  recentItems: LifecyclePreferenceRecentItem[];
+  duplicateSamples: LifecyclePreferenceDuplicateSample[];
+}
+
 export interface LifecycleStatsSnapshot {
   generatedAt: string;
   thresholds: {
@@ -115,6 +151,7 @@ export interface LifecycleStatsSnapshot {
   archiveCandidates: number;
   lowConfidenceCount: number;
   categoryStats: LifecycleCategoryStat[];
+  preferenceExtraction: LifecyclePreferenceStats;
   analysis: LifecycleAnalysis;
 }
 
@@ -170,6 +207,11 @@ interface PreferenceExtractionResult {
   agentsProcessed: number;
 }
 
+interface PreferenceDuplicateAuditResult {
+  flagged: number;
+  groups: number;
+}
+
 interface ProfileSynthesisResult {
   agentsProcessed: number;
   llmCalls: number;
@@ -184,6 +226,14 @@ interface LifecycleStatsMemoryRow {
   created_at: string;
   decay_score: number;
   is_pinned: number;
+}
+
+interface PreferenceMemoryRow {
+  id: string;
+  content: string;
+  confidence: number;
+  created_at: string;
+  metadata: string | null;
 }
 
 // In-memory profile cache: agentId -> { text, timestamp }
@@ -297,21 +347,24 @@ export class LifecycleEngine {
         }, true);
       }
 
-      // Phase 3: Core dedup and merge (skip in dry-run — O(N) embedding calls)
-      if (!dryRun) {
-        log.info('Phase 3: deduplicateCore');
+      if (this.config.lifecycle.preferenceExtraction?.duplicateAuditEnabled && !dryRun) {
+        log.info('Phase 2c: auditPreferenceDuplicates');
         const phaseStart = Date.now();
-        report.merged = await this.deduplicateCore(dryRun, agentId);
-        recordPhase('deduplicateCore', phaseStart, report.merged);
+        const duplicateAudit = this.auditPreferenceDuplicates(agentId);
+        report.preferenceDuplicatesFlagged = duplicateAudit.flagged;
+        recordPhase('auditPreferenceDuplicates', phaseStart, duplicateAudit.flagged, {
+          groups: duplicateAudit.groups,
+        });
       } else {
-        log.info('Phase 3: deduplicateCore (skipped in dry-run)');
         const phaseStart = Date.now();
-        recordPhase('deduplicateCore', phaseStart, 0, { reason: 'dry_run' }, true);
+        recordPhase('auditPreferenceDuplicates', phaseStart, 0, {
+          reason: dryRun ? 'dry_run' : 'disabled',
+        }, true);
       }
 
-      // Phase 3b: Incremental contradiction audit (flag only)
+      // Phase 3: Incremental contradiction audit (flag only)
       if (this.config.lifecycle.contradictionAudit?.enabled && !dryRun) {
-        log.info('Phase 3b: contradictionAudit');
+        log.info('Phase 3: contradictionAudit');
         const phaseStart = Date.now();
         const audit = await this.runContradictionAudit(report.affectedMemories, agentId, llmTracker);
         report.contradictionFlagged = audit.flagged;
@@ -326,6 +379,18 @@ export class LifecycleEngine {
         recordPhase('contradictionAudit', phaseStart, 0, {
           reason: dryRun ? 'dry_run' : 'disabled',
         }, true);
+      }
+
+      // Phase 3b: Core dedup and merge (skip in dry-run — O(N) embedding calls)
+      if (!dryRun) {
+        log.info('Phase 3b: deduplicateCore');
+        const phaseStart = Date.now();
+        report.merged = await this.deduplicateCore(dryRun, agentId);
+        recordPhase('deduplicateCore', phaseStart, report.merged);
+      } else {
+        log.info('Phase 3b: deduplicateCore (skipped in dry-run)');
+        const phaseStart = Date.now();
+        recordPhase('deduplicateCore', phaseStart, 0, { reason: 'dry_run' }, true);
       }
 
       // Phase 4: Core -> Archive demotion
@@ -544,6 +609,7 @@ export class LifecycleEngine {
         minDecayScore: Number((row.minDecayScore ?? 0).toFixed(3)),
         maxDecayScore: Number((row.maxDecayScore ?? 0).toFixed(3)),
       })),
+      preferenceExtraction: this.buildPreferenceExtractionStats(agentId),
       analysis: this.buildLifecycleAnalysis(
         activeMemories,
         this.config.lifecycle.archiveThreshold,
@@ -748,6 +814,24 @@ export class LifecycleEngine {
     });
   }
 
+  private mergePreferenceDuplicateMetadata(existing: Memory, duplicateIds: string[]): string {
+    const meta = this.parseMetadata(existing.metadata);
+    const currentDuplicates = Array.isArray(meta.preference_duplicate_with) ? meta.preference_duplicate_with : [];
+    const mergedDuplicates = Array.from(new Set([
+      ...currentDuplicates,
+      ...duplicateIds.filter((id) => id !== existing.id),
+    ]));
+    return JSON.stringify({
+      ...meta,
+      audit_flag: 'duplicate_preference',
+      audit_reason: 'preference_duplicate_exact',
+      preference_duplicate_with: mergedDuplicates,
+      preference_duplicate_count: mergedDuplicates.length + 1,
+      preference_duplicate_audit_at: new Date().toISOString(),
+      preference_duplicate_audit_version: 1,
+    });
+  }
+
   private async judgeContradiction(
     memoryA: Memory,
     memoryB: Memory,
@@ -931,6 +1015,188 @@ Return JSON only:
     }
   }
 
+  private normalizePreferenceContent(content: string): string {
+    return content
+      .normalize('NFKC')
+      .trim()
+      .toLowerCase()
+      .replace(/[。．.!?！？;；,:，]+$/g, '')
+      .replace(/\s+/g, ' ');
+  }
+
+  private parseSourceMemoryIds(metadata: string | null): string[] {
+    if (!metadata) return [];
+    try {
+      const parsed = JSON.parse(metadata);
+      if (!Array.isArray(parsed?.source_memories)) return [];
+      return parsed.source_memories.filter((id: unknown) => typeof id === 'string' && id.trim());
+    } catch {
+      return [];
+    }
+  }
+
+  private buildPreferenceExtractionStats(agentId?: string): LifecyclePreferenceStats {
+    const db = getDb();
+    const prefConfig = this.config.lifecycle.preferenceExtraction;
+    const agentFilter = agentId ? ' AND agent_id = ?' : '';
+    const params = agentId ? [agentId] : [];
+    const recentCutoff = new Date(Date.now() - prefConfig.lookbackDays * 86_400_000).toISOString();
+    const lowConfidenceThreshold = 0.75;
+
+    const totalPreferences = (db.prepare(`
+      SELECT COUNT(*) as count
+      FROM memories
+      WHERE layer = 'core'
+        AND category = 'preference'
+        AND superseded_by IS NULL${agentFilter}
+    `).get(...params) as { count: number }).count;
+
+    const lifecycleExtracted = db.prepare(`
+      SELECT id, content, confidence, created_at, metadata
+      FROM memories
+      WHERE layer = 'core'
+        AND category = 'preference'
+        AND source = 'lifecycle:preference-extraction'
+        AND superseded_by IS NULL${agentFilter}
+      ORDER BY created_at DESC
+    `).all(...params) as PreferenceMemoryRow[];
+
+    const recentItemsRaw = lifecycleExtracted.filter((memory) => memory.created_at >= recentCutoff);
+    const sourceIds = new Set<string>();
+    const recentItemsWithSources = recentItemsRaw.map((memory) => {
+      const sourceMemoryIds = this.parseSourceMemoryIds(memory.metadata);
+      for (const id of sourceMemoryIds) sourceIds.add(id);
+      return { memory, sourceMemoryIds };
+    });
+
+    const existingSourceIds = new Set<string>();
+    if (sourceIds.size > 0) {
+      const sourceIdList = Array.from(sourceIds);
+      const placeholders = sourceIdList.map(() => '?').join(', ');
+      const rows = db.prepare(`SELECT id FROM memories WHERE id IN (${placeholders})`)
+        .all(...sourceIdList) as Array<{ id: string }>;
+      for (const row of rows) existingSourceIds.add(row.id);
+    }
+
+    const duplicateMap = new Map<string, PreferenceMemoryRow[]>();
+    for (const memory of lifecycleExtracted) {
+      const normalized = this.normalizePreferenceContent(memory.content);
+      if (!normalized) continue;
+      const group = duplicateMap.get(normalized) || [];
+      group.push(memory);
+      duplicateMap.set(normalized, group);
+    }
+
+    const duplicateGroups = Array.from(duplicateMap.values())
+      .filter((group) => group.length > 1)
+      .sort((a, b) => b.length - a.length || b[0]!.created_at.localeCompare(a[0]!.created_at));
+
+    const duplicateCountById = new Map<string, number>();
+    for (const group of duplicateGroups) {
+      for (const item of group) {
+        duplicateCountById.set(item.id, group.length);
+      }
+    }
+
+    const allRecentItems = recentItemsWithSources.map(({ memory, sourceMemoryIds }) => ({
+      id: memory.id,
+      content: memory.content,
+      confidence: memory.confidence,
+      createdAt: memory.created_at,
+      sourceMemoryCount: sourceMemoryIds.length,
+      missingSourceMemoryCount: sourceMemoryIds.filter((id) => !existingSourceIds.has(id)).length,
+      duplicateCount: duplicateCountById.get(memory.id) ?? 0,
+    }));
+
+    const lowConfidenceRecent = allRecentItems.filter((item) => item.confidence < lowConfidenceThreshold).length;
+    const missingSourceRecent = allRecentItems.filter((item) => item.sourceMemoryCount === 0 || item.missingSourceMemoryCount > 0).length;
+    const averageSourceMemories = allRecentItems.length > 0
+      ? Number((allRecentItems.reduce((sum, item) => sum + item.sourceMemoryCount, 0) / allRecentItems.length).toFixed(2))
+      : 0;
+    const recentItems = allRecentItems.slice(0, 8);
+
+    return {
+      enabled: prefConfig.enabled,
+      recentWindowDays: prefConfig.lookbackDays,
+      thresholds: {
+        dedupSimilarity: prefConfig.dedupSimilarity,
+        lowConfidenceThreshold,
+      },
+      totalPreferences,
+      lifecycleExtractedTotal: lifecycleExtracted.length,
+      recentExtracted: recentItemsRaw.length,
+      lowConfidenceRecent,
+      missingSourceRecent,
+      duplicateGroups: duplicateGroups.length,
+      duplicatePreferences: duplicateGroups.reduce((sum, group) => sum + group.length, 0),
+      averageSourceMemories,
+      recentItems,
+      duplicateSamples: duplicateGroups.slice(0, 5).map((group) => ({
+        content: group[0]!.content,
+        count: group.length,
+        memoryIds: group.map((memory) => memory.id),
+      })),
+    };
+  }
+
+  private auditPreferenceDuplicates(agentId?: string): PreferenceDuplicateAuditResult {
+    const db = getDb();
+    const prefConfig = this.config.lifecycle.preferenceExtraction;
+    const agentFilter = agentId ? ' AND agent_id = ?' : '';
+    const params = agentId ? [agentId] : [];
+    const recentCutoff = new Date(Date.now() - prefConfig.lookbackDays * 86_400_000).toISOString();
+
+    const preferences = db.prepare(`
+      SELECT *
+      FROM memories
+      WHERE layer = 'core'
+        AND category = 'preference'
+        AND source = 'lifecycle:preference-extraction'
+        AND superseded_by IS NULL${agentFilter}
+      ORDER BY created_at DESC
+    `).all(...params) as Memory[];
+
+    const groups = new Map<string, Memory[]>();
+    for (const memory of preferences) {
+      const normalized = this.normalizePreferenceContent(memory.content);
+      if (!normalized) continue;
+      const list = groups.get(normalized) || [];
+      list.push(memory);
+      groups.set(normalized, list);
+    }
+
+    let flagged = 0;
+    let groupCount = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      if (!group.some((memory) => memory.created_at >= recentCutoff)) continue;
+
+      const ids = group.map((memory) => memory.id);
+      const shouldUpdate = group.some((memory) => {
+        const meta = this.parseMetadata(memory.metadata);
+        const existing = Array.isArray(meta.preference_duplicate_with) ? meta.preference_duplicate_with : [];
+        const expected = ids.filter((id) => id !== memory.id);
+        if (meta.audit_flag !== 'duplicate_preference') return true;
+        if (existing.length !== expected.length) return true;
+        return expected.some((id) => !existing.includes(id));
+      });
+      if (!shouldUpdate) continue;
+
+      for (const memory of group) {
+        updateMemory(memory.id, { metadata: this.mergePreferenceDuplicateMetadata(memory, ids) });
+      }
+      insertLifecycleLog('preference_duplicate_flagged', ids, {
+        agent_id: agentId || group[0]!.agent_id,
+        count: group.length,
+        normalized_content: this.normalizePreferenceContent(group[0]!.content),
+      });
+      flagged += group.length;
+      groupCount++;
+    }
+
+    return { flagged, groups: groupCount };
+  }
+
   private async extractPreferences(agentId: string | undefined, llmTracker: LifecycleLLMTracker): Promise<PreferenceExtractionResult> {
     const db = getDb();
     const prefConfig = this.config.lifecycle.preferenceExtraction;
@@ -1060,6 +1326,8 @@ Return JSON array only:
         insertLifecycleLog('preference_extracted', [inserted.id], {
           agent_id: currentAgentId,
           source_memories: candidate.source_memories ?? memories.map((memory) => memory.id),
+          source_memory_count: (candidate.source_memories ?? memories.map((memory) => memory.id)).length,
+          confidence: inserted.confidence,
         });
         extracted++;
       }
@@ -1188,7 +1456,11 @@ Return JSON array only:
     const fourHoursAgo = new Date(Date.now() - 4 * 3600_000).toISOString();
     const coreEntries = db.prepare(
       `SELECT * FROM memories WHERE layer = 'core' AND superseded_by IS NULL
-        AND (source LIKE 'lifecycle:%' OR created_at > ?)${agentFilter}
+        AND category != 'preference'
+        AND (
+          source IN ('lifecycle:promotion', 'lifecycle:auto-promotion', 'lifecycle:compression')
+          OR created_at > ?
+        )${agentFilter}
         ORDER BY created_at DESC`
     ).all(fourHoursAgo, ...params) as Memory[];
 
@@ -1205,6 +1477,7 @@ Return JSON array only:
     for (const entry of coreEntries) {
       if (entry.is_pinned) continue;
       if (superseded.has(entry.id)) continue;
+      if (this.parseMetadata(entry.metadata).audit_flag) continue;
 
       try {
         const embedding = await this.embeddingProvider.embed(entry.content);
@@ -1221,6 +1494,8 @@ Return JSON array only:
           ).get(hit.id) as Memory | undefined;
           if (!existing || existing.is_pinned) continue;
           if (existing.agent_id !== entry.agent_id) continue;
+          if (existing.category !== entry.category) continue;
+          if (this.parseMetadata(existing.metadata).audit_flag) continue;
 
           // entry is newer (ORDER BY DESC), keep entry, supersede existing
           if (!dryRun) {

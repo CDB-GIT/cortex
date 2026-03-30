@@ -93,7 +93,15 @@ function runMigrations(db: Database.Database): void {
   for (const migration of pending) {
     log.info({ migration: migration.name }, 'Applying migration');
     db.transaction(() => {
-      db.exec(migration.sql);
+      if (migration.name === '015_agent_memory_disabled') {
+        const columns = db.prepare(`PRAGMA table_info(agents)`).all() as Array<{ name: string }>;
+        const hasMemoryDisabled = columns.some((column) => column.name === 'memory_disabled');
+        if (!hasMemoryDisabled) {
+          db.exec(migration.sql);
+        }
+      } else {
+        db.exec(migration.sql);
+      }
       db.prepare('INSERT INTO _migrations (name) VALUES (?)').run(migration.name);
     })();
   }

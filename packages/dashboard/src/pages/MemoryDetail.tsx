@@ -23,6 +23,29 @@ interface Memory {
 
 const CATEGORIES = ['identity', 'preference', 'decision', 'fact', 'entity', 'correction', 'todo', 'context', 'summary', 'skill', 'relationship', 'goal', 'insight', 'project_state', 'constraint', 'policy', 'agent_self_improvement', 'agent_user_habit', 'agent_relationship', 'agent_persona'];
 
+const CATEGORY_LABELS: Record<string, string> = {
+  identity: '\u8eab\u4efd\u4fe1\u606f',
+  preference: '\u504f\u597d\u4e60\u60ef',
+  decision: '\u5173\u952e\u51b3\u7b56',
+  fact: '\u4e8b\u5b9e',
+  entity: '\u5b9e\u4f53',
+  correction: '\u7ea0\u6b63',
+  todo: '\u5f85\u529e/\u63d0\u9192',
+  context: '\u4e0a\u4e0b\u6587',
+  summary: '\u5386\u53f2\u6458\u8981',
+  skill: '\u6280\u80fd',
+  relationship: '\u5173\u7cfb',
+  goal: '\u76ee\u6807\u8ba1\u5212',
+  insight: '\u6d1e\u5bdf\u5fc3\u5f97',
+  project_state: '\u9879\u76ee\u72b6\u6001',
+  constraint: '\u7ea6\u675f',
+  policy: '\u7b56\u7565',
+  agent_self_improvement: 'Agent \u81ea\u6211\u6539\u8fdb',
+  agent_user_habit: 'Agent \u7528\u6237\u89c2\u5bdf',
+  agent_relationship: 'Agent \u5173\u7cfb\u52a8\u6001',
+  agent_persona: 'Agent \u4eba\u8bbe\u98ce\u683c',
+};
+
 /** Parse metadata JSON safely */
 function parseMeta(m: Memory): Record<string, any> | null {
   if (!m.metadata) return null;
@@ -68,6 +91,10 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
   const [memory, setMemory] = useState<Memory | null>(null);
   const [chain, setChain] = useState<Memory[]>([]);
   const [similar, setSimilar] = useState<any[]>([]);
+  const [loadingContext, setLoadingContext] = useState(false);
+  const [duplicatePeers, setDuplicatePeers] = useState<Memory[]>([]);
+  const [showDuplicateSuggestion, setShowDuplicateSuggestion] = useState(false);
+  const [loadingDuplicatePeers, setLoadingDuplicatePeers] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<{ content: string; category: string; importance: number; is_pinned: boolean }>({ content: '', category: '', importance: 0, is_pinned: false });
@@ -86,31 +113,79 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
     loadMemoryData(memoryId);
   }, [memoryId]);
 
+  useEffect(() => {
+    if (!memory) {
+      setDuplicatePeers([]);
+      return;
+    }
+
+    const currentMeta = parseMeta(memory);
+    const duplicateIds = Array.isArray(currentMeta?.preference_duplicate_with)
+      ? currentMeta.preference_duplicate_with.filter((id: unknown) => typeof id === 'string' && id.trim())
+      : [];
+
+    if (duplicateIds.length === 0) {
+      setDuplicatePeers([]);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingDuplicatePeers(true);
+    Promise.all(duplicateIds.map((id: string) => getMemory(id).catch(() => null)))
+      .then((items) => {
+        if (cancelled) return;
+        setDuplicatePeers(items.filter(Boolean));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDuplicatePeers(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [memory?.id, memory?.metadata]);
+
   const loadMemoryData = async (id: string) => {
     setLoading(true);
+    setLoadingContext(false);
+    setChain([]);
+    setSimilar([]);
     try {
       const mem = await getMemory(id);
       setMemory(mem);
       setDraft({ content: mem.content, category: mem.category, importance: mem.importance, is_pinned: !!mem.is_pinned });
+      setLoading(false);
+      setLoadingContext(true);
 
-      // Load version chain via API (single call)
-      try {
-        const chainRes = await getMemoryChain(id);
-        setChain(chainRes.chain || []);
-      } catch {
-        setChain([mem]);
-      }
+      void (async () => {
+        try {
+          const chainRes = await getMemoryChain(id);
+          setChain(chainRes.chain || [mem]);
+        } catch {
+          setChain([mem]);
+        }
+      })();
 
-      // Find similar memories
-      try {
-        const snippet = mem.content.slice(0, 100);
-        const res = await search({ query: snippet, limit: 6, debug: false });
-        setSimilar((res.results || []).filter((r: any) => r.id !== id).slice(0, 5));
-      } catch { setSimilar([]); }
+      // Defer related-memory search until the detail shell is already visible.
+      void (async () => {
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const snippet = mem.content.slice(0, 100);
+          const res = await search({ query: snippet, limit: 6, debug: false });
+          setSimilar((res.results || []).filter((r: any) => r.id !== id).slice(0, 5));
+        } catch {
+          setSimilar([]);
+        } finally {
+          setLoadingContext(false);
+        }
+      })();
     } catch (e: any) {
       console.error(e);
+      setLoading(false);
+      setLoadingContext(false);
+      setChain([]);
+      setSimilar([]);
     }
-    setLoading(false);
   };
 
   const handleSave = async () => {
@@ -153,6 +228,37 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
   // Determine the latest version in the chain
   const latestInChain = chain.length > 0 ? chain[chain.length - 1] : null;
   const isLatest = latestInChain?.id === memory.id;
+  const meta = parseMeta(memory);
+  const sourceMemoryIds = Array.isArray(meta?.source_memories)
+    ? meta.source_memories.filter((id: unknown) => typeof id === 'string' && id.trim())
+    : [];
+  const duplicatePreferenceIds = Array.isArray(meta?.preference_duplicate_with)
+    ? meta.preference_duplicate_with.filter((id: unknown) => typeof id === 'string' && id.trim())
+    : [];
+  const auditFlag = typeof meta?.audit_flag === 'string' ? meta.audit_flag : null;
+  const duplicateCandidates = [memory, ...duplicatePeers].filter(
+    (candidate, index, list) => list.findIndex((item) => item.id === candidate.id) === index,
+  );
+  const getSourceCount = (candidate: Memory) => {
+    const candidateMeta = parseMeta(candidate);
+    return Array.isArray(candidateMeta?.source_memories)
+      ? candidateMeta.source_memories.filter((id: unknown) => typeof id === 'string' && id.trim()).length
+      : 0;
+  };
+  const sortedDuplicateCandidates = [...duplicateCandidates].sort((a, b) => {
+    if (!!a.is_pinned !== !!b.is_pinned) return a.is_pinned ? -1 : 1;
+    if ((b.confidence ?? 0) !== (a.confidence ?? 0)) return (b.confidence ?? 0) - (a.confidence ?? 0);
+    if (getSourceCount(b) !== getSourceCount(a)) return getSourceCount(b) - getSourceCount(a);
+    if (b.updated_at !== a.updated_at) return b.updated_at.localeCompare(a.updated_at);
+    if ((b.importance ?? 0) !== (a.importance ?? 0)) return (b.importance ?? 0) - (a.importance ?? 0);
+    return a.id.localeCompare(b.id);
+  });
+  const recommendedDuplicateKeeper = sortedDuplicateCandidates[0] ?? null;
+  const duplicateSuggestionReason = recommendedDuplicateKeeper?.is_pinned
+    ? t('memoryDetail.duplicateSuggestPinned')
+    : recommendedDuplicateKeeper?.id === memory.id
+      ? t('memoryDetail.duplicateSuggestCurrent')
+      : t('memoryDetail.duplicateSuggestEvidence');
 
   return (
     <div>
@@ -185,8 +291,11 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
           <span className={`badge ${memory.layer}`}>{memory.layer}</span>
-          <span className="badge">{memory.category}</span>
+          <span className="badge">{CATEGORY_LABELS[memory.category] || memory.category}</span>
           {memory.is_pinned ? <span className="badge" style={{ background: 'var(--color-warning-muted)', color: 'var(--color-warning)' }}>{t('memoryDetail.pinned')}</span> : null}
+          {auditFlag === 'duplicate_preference' ? (
+            <span className="badge" style={{ background: 'rgba(249,115,22,0.18)', color: '#c2410c' }}>{t('memoryDetail.duplicatePreference')}</span>
+          ) : null}
         </div>
 
         {editing ? (
@@ -194,7 +303,7 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
             <div className="form-group">
               <label>{t('memoryDetail.category')}</label>
               <select value={draft.category} onChange={e => setDraft({ ...draft, category: e.target.value })}>
-                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
               </select>
             </div>
             <div className="form-group">
@@ -270,6 +379,58 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
             <tr><td style={{ color: 'var(--color-text-secondary)' }}>{t('memoryDetail.updated')}</td><td>{toLocal(memory.updated_at)}</td></tr>
             {memory.agent_id && <tr><td style={{ color: 'var(--color-text-secondary)' }}>{t('memoryDetail.agent')}</td><td>{memory.agent_id}</td></tr>}
             {memory.source && <tr><td style={{ color: 'var(--color-text-secondary)' }}>{t('memoryDetail.source')}</td><td>{memory.source}</td></tr>}
+            {(sourceMemoryIds.length > 0 || memory.source === 'lifecycle:preference-extraction') && (
+              <tr>
+                <td style={{ color: 'var(--color-text-secondary)', verticalAlign: 'top' }}>{t('memoryDetail.sourceMemories')}</td>
+                <td>
+                  {sourceMemoryIds.length === 0 ? (
+                    <span style={{ color: 'var(--color-text-secondary)' }}>{t('memoryDetail.sourceMemoryNone')}</span>
+                  ) : (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {sourceMemoryIds.map((id: string) => (
+                        <button
+                          key={id}
+                          className="btn"
+                          style={{ fontSize: 11, padding: '2px 8px' }}
+                          onClick={() => { loadMemoryData(id); window.scrollTo(0, 0); }}
+                        >
+                          {id}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </td>
+              </tr>
+            )}
+            {auditFlag === 'duplicate_preference' && (
+              <tr>
+                <td style={{ color: 'var(--color-text-secondary)', verticalAlign: 'top' }}>{t('memoryDetail.duplicatePreference')}</td>
+                <td>
+                  <div style={{ marginBottom: duplicatePreferenceIds.length > 0 ? 6 : 0 }}>{t('memoryDetail.duplicatePreferenceDesc')}</div>
+                  <button
+                    className="btn"
+                    style={{ fontSize: 12, marginBottom: 8 }}
+                    onClick={() => setShowDuplicateSuggestion(true)}
+                  >
+                    {t('memoryDetail.duplicateSuggestionButton')}
+                  </button>
+                  {duplicatePreferenceIds.length > 0 ? (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {duplicatePreferenceIds.map((id: string) => (
+                        <button
+                          key={id}
+                          className="btn"
+                          style={{ fontSize: 11, padding: '2px 8px' }}
+                          onClick={() => { loadMemoryData(id); window.scrollTo(0, 0); }}
+                        >
+                          {id}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </td>
+              </tr>
+            )}
             {memory.metadata && (
               <tr><td style={{ color: 'var(--color-text-secondary)' }}>{t('memoryDetail.metadata')}</td><td><pre style={{ fontSize: 11, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxWidth: '100%' }}>{JSON.stringify(JSON.parse(memory.metadata), null, 2)}</pre></td></tr>
             )}
@@ -315,10 +476,12 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
       </div>
 
       {/* Similar Memories */}
-      {similar.length > 0 && (
+      {(loadingContext || similar.length > 0) && (
         <div className="card" style={{ marginBottom: 16 }}>
           <h3 style={{ marginBottom: 12 }}>{t('memoryDetail.relatedMemories')}</h3>
-          {similar.map((s: any) => (
+          {loadingContext && similar.length === 0 ? (
+            <div className="empty">{t('common.loading')}</div>
+          ) : similar.map((s: any) => (
             <div
               key={s.id}
               className="memory-card"
@@ -443,6 +606,68 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
               <button className="btn" onClick={() => setDiffPair(null)}>{t('common.close')}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDuplicateSuggestion && (
+        <div className="modal-overlay" onClick={() => setShowDuplicateSuggestion(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 760, maxHeight: '80vh', overflow: 'auto' }}>
+            <h3 style={{ marginBottom: 12 }}>{t('memoryDetail.duplicateSuggestionTitle')}</h3>
+            <div style={{ marginBottom: 12, color: 'var(--color-text-secondary)', fontSize: 13 }}>
+              {t('memoryDetail.duplicateSuggestionDesc')}
+            </div>
+            {recommendedDuplicateKeeper && (
+              <div style={{
+                marginBottom: 12,
+                padding: 12,
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--color-success-muted)',
+                border: '1px solid var(--color-success-border)',
+              }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 4 }}>{t('memoryDetail.duplicateSuggestionRecommended')}</div>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>{recommendedDuplicateKeeper.id}</div>
+                <div style={{ fontSize: 13, marginBottom: 6, whiteSpace: 'pre-wrap' }}>{recommendedDuplicateKeeper.content}</div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{duplicateSuggestionReason}</div>
+              </div>
+            )}
+            {loadingDuplicatePeers ? (
+              <div className="empty">{t('common.loading')}</div>
+            ) : (
+              <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                <table style={{ fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>{t('memoryDetail.id')}</th>
+                      <th>{t('memoryDetail.content')}</th>
+                      <th>{t('memoryDetail.confidence')}</th>
+                      <th>{t('memoryDetail.sourceMemories')}</th>
+                      <th>{t('memoryDetail.updated')}</th>
+                      <th>{t('memoryDetail.duplicateRecommendation')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedDuplicateCandidates.map((candidate) => (
+                      <tr key={candidate.id}>
+                        <td style={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>{candidate.id}</td>
+                        <td style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{candidate.content}</td>
+                        <td>{(candidate.confidence ?? 0).toFixed(2)}</td>
+                        <td>{getSourceCount(candidate)}</td>
+                        <td style={{ whiteSpace: 'nowrap' }}>{toLocal(candidate.updated_at)}</td>
+                        <td>
+                          {recommendedDuplicateKeeper?.id === candidate.id
+                            ? (t('memoryDetail.duplicateRecommendationKeep') || '建议保留')
+                            : (t('memoryDetail.duplicateRecommendationSupersede') || '建议并入')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+              <button className="btn" onClick={() => setShowDuplicateSuggestion(false)}>{t('common.close')}</button>
             </div>
           </div>
         </div>

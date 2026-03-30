@@ -1,13 +1,14 @@
 import pino from 'pino';
-import { Transform } from 'node:stream';
+import pretty from 'pino-pretty';
+import { Writable } from 'node:stream';
 
-// Ring buffer for in-memory log viewing
+type BufferedLogEntry = { level: string; time: number; module?: string; msg: string };
+
 const LOG_BUFFER_SIZE = 500;
-const logBuffer: { level: string; time: number; module?: string; msg: string }[] = [];
+const logBuffer: BufferedLogEntry[] = [];
 
-// Tee stream: captures JSON lines into ring buffer, passes through to stdout
-const tee = new Transform({
-  transform(chunk, _enc, cb) {
+const bufferStream = new Writable({
+  write(chunk, _enc, cb) {
     try {
       const line = chunk.toString().trim();
       if (line.startsWith('{')) {
@@ -20,27 +21,26 @@ const tee = new Transform({
         });
         if (logBuffer.length > LOG_BUFFER_SIZE) logBuffer.shift();
       }
-    } catch {}
-    cb(null, chunk);
+    } catch {
+      // best effort
+    }
+    cb();
   },
 });
-tee.pipe(process.stdout);
 
-// Use pino-pretty in dev, raw JSON otherwise
 const usePretty = process.env.NODE_ENV !== 'production';
+const outputStream = usePretty
+  ? pretty({ colorize: true, sync: true })
+  : process.stdout;
 
-export const logger = usePretty
-  ? pino({
-      level: process.env.LOG_LEVEL || 'info',
-      transport: { target: 'pino-pretty', options: { colorize: true } },
-    })
-  : pino({ level: process.env.LOG_LEVEL || 'info' }, tee);
+const streams = usePretty
+  ? [{ stream: outputStream }, { stream: bufferStream }]
+  : [{ stream: process.stdout }, { stream: bufferStream }];
 
-// For pino-pretty (dev), we can't intercept the stream easily,
-// so also hook via a custom onChild approach — but simpler: just
-// always use the tee approach and skip pino-pretty in container.
-// Since this runs in Docker (production), tee works.
-// In dev, buffer won't fill — acceptable tradeoff.
+export const logger = pino(
+  { level: process.env.LOG_LEVEL || 'info' },
+  pino.multistream(streams as Array<{ stream: NodeJS.WritableStream }>),
+);
 
 export function createLogger(name: string) {
   return logger.child({ module: name });
@@ -57,7 +57,7 @@ export function getLogLevel(): string {
 export function getLogBuffer(limit = 100, level?: string): typeof logBuffer {
   let logs = logBuffer.slice(-Math.min(limit, LOG_BUFFER_SIZE));
   if (level) {
-    logs = logs.filter(l => l.level === level);
+    logs = logs.filter((l) => l.level === level);
   }
-  return logs.reverse(); // newest first
+  return logs.reverse();
 }

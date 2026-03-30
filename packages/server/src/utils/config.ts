@@ -129,6 +129,7 @@ const CortexConfigSchema = z.object({
       maxNewPreferences: z.number().min(1).max(20).default(5),
       maxLLMCalls: z.number().min(1).max(20).default(3),
       dedupSimilarity: z.number().min(0.1).max(0.99).default(0.85),
+      duplicateAuditEnabled: z.boolean().default(false),
     }).default({}),
   }).default({}),
   selfImprovement: z.object({

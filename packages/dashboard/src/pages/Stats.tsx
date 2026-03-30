@@ -34,6 +34,8 @@ function BarChart({ data, colors, height = 220 }: { data: { label: string; value
     ctx.scale(dpr, dpr);
     const W = rect.width;
     const H = rect.height;
+    const chartBottom = 44;
+    const chartTop = 20;
     const max = Math.max(...data.map(d => d.value), 1);
     const barW = Math.min(60, (W - 40) / data.length - 10);
     const startX = (W - data.length * (barW + 10) + 10) / 2;
@@ -44,7 +46,7 @@ function BarChart({ data, colors, height = 220 }: { data: { label: string; value
     ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
-      const y = 20 + (H - 90) * (1 - i / 4);
+      const y = chartTop + (H - chartTop - chartBottom) * (1 - i / 4);
       ctx.beginPath(); ctx.moveTo(30, y); ctx.lineTo(W - 10, y); ctx.stroke();
       ctx.fillStyle = '#71717a';
       ctx.font = '10px system-ui';
@@ -54,8 +56,8 @@ function BarChart({ data, colors, height = 220 }: { data: { label: string; value
 
     data.forEach((d, i) => {
       const x = startX + i * (barW + 10);
-      const barH = (d.value / max) * (H - 90);
-      const y = H - 70 - barH;
+      const barH = (d.value / max) * (H - chartTop - chartBottom);
+      const y = H - chartBottom - barH;
 
       // Bar with gradient
       const grad = ctx.createLinearGradient(x, y, x, H - 70);
@@ -71,20 +73,23 @@ function BarChart({ data, colors, height = 220 }: { data: { label: string; value
       ctx.font = 'bold 12px system-ui';
       ctx.textAlign = 'center';
       ctx.fillText(String(d.value), x + barW / 2, y - 6);
-
-      // Label (rotated 45°)
-      ctx.fillStyle = '#71717a';
-      ctx.font = '10px system-ui';
-      ctx.save();
-      ctx.translate(x + barW / 2, H - 18);
-      ctx.rotate(-Math.PI / 4);
-      ctx.textAlign = 'right';
-      ctx.fillText(d.label, 0, 0);
-      ctx.restore();
     });
   }, [data, colors, height]);
 
-  return <canvas ref={canvasRef} style={{ width: '100%', height: height }} />;
+  return (
+    <div>
+      <canvas ref={canvasRef} style={{ width: '100%', height: height }} />
+      <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', marginTop: 'var(--space-2)' }}>
+        {data.map((item, index) => (
+          <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 12, minWidth: 120 }}>
+            <div style={{ width: 10, height: 10, borderRadius: 'var(--radius-sm)', background: colors[index % colors.length] }} />
+            <span style={{ color: 'var(--color-text-secondary)' }}>{item.label}</span>
+            <span style={{ fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{item.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ─── Horizontal Distribution Bar ────────────────────────────────────────────
@@ -128,7 +133,7 @@ function DistributionBar({ segments }: { segments: { label: string; value: numbe
 
 // ─── Importance Histogram ───────────────────────────────────────────────────
 
-function Histogram({ values, label, color }: { values: number[]; label: string; color: string }) {
+function Histogram({ values, color }: { values: number[]; color: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -178,10 +183,7 @@ function Histogram({ values, label, color }: { values: number[]; label: string; 
       ctx.fillText((i / 10).toFixed(1), x + barW / 2, H - 8);
     });
 
-    // Title
-    ctx.fillStyle = '#71717a'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
-    ctx.fillText(label, W / 2, H - 0);
-  }, [values, label, color]);
+  }, [values, color]);
 
   return <canvas ref={canvasRef} style={{ width: '100%', height: 140 }} />;
 }
@@ -193,6 +195,7 @@ export default function Stats() {
   const [health, setHealth] = useState<any>(null);
   const [error, setError] = useState('');
   const [allMemories, setAllMemories] = useState<any[]>([]);
+  const [secondaryReady, setSecondaryReady] = useState(false);
   const [components, setComponents] = useState<any[]>([]);
   const [connTest, setConnTest] = useState<any>(null);
   const [testing, setTesting] = useState(false);
@@ -209,24 +212,35 @@ export default function Stats() {
     Promise.all([getStats(), getHealth()])
       .then(([s, h]) => { setStats(s); setHealth(h); })
       .catch(e => setError(e.message));
-
-    getComponentHealth()
-      .then((r: any) => setComponents(r.components || []))
-      .catch(() => {});
-
-    listAgents()
-      .then((r: any) => {
-        const list = r.agents || [];
-        setAgents(list);
-        if (list.length > 0 && !recallAgent) setRecallAgent(list[0].id);
-      })
-      .catch(() => {});
-
-    // Load sample memories for distribution histograms
-    listMemories({ limit: '500', offset: '0' })
-      .then((r: any) => setAllMemories(r.items || []))
-      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!stats) return;
+    setSecondaryReady(false);
+    const timer = window.setTimeout(() => {
+      getComponentHealth()
+        .then((r: any) => setComponents(r.components || []))
+        .catch(() => {});
+
+      listAgents()
+        .then((r: any) => {
+          const list = r.agents || [];
+          setAgents(list);
+          if (list.length > 0) {
+            setRecallAgent((prev) => prev || list[0].id);
+          }
+        })
+        .catch(() => {});
+
+      // Keep the histogram sample smaller to reduce dashboard startup cost.
+      listMemories({ limit: '250', offset: '0' })
+        .then((r: any) => setAllMemories(r.items || []))
+        .catch(() => {})
+        .finally(() => setSecondaryReady(true));
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [stats]);
 
   if (error) return <div className="card" style={{ color: 'var(--color-danger)' }}>{t('common.errorPrefix', { message: error })}</div>;
   if (!stats) return <div className="loading">{t('common.loading')}</div>;
@@ -306,20 +320,27 @@ export default function Stats() {
       )}
 
       {/* Score Distributions */}
-      {allMemories.length > 0 && (
+      {(secondaryReady || allMemories.length > 0) && (
         <div className="card">
           <h3 style={{ marginBottom: 'var(--space-3)' }}>{t('stats.scoreDistributions')}</h3>
+          {allMemories.length === 0 ? (
+            <div className="empty">{t('common.loading')}</div>
+          ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 'var(--space-4)' }}>
             <div style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', padding: 'var(--space-3)', border: '1px solid var(--color-border-subtle)' }}>
-              <Histogram values={importanceValues} label={t('stats.importance')} color="#6366f1" />
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 'var(--space-2)' }}>{t('stats.importance')}</div>
+              <Histogram values={importanceValues} color="#6366f1" />
             </div>
             <div style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', padding: 'var(--space-3)', border: '1px solid var(--color-border-subtle)' }}>
-              <Histogram values={decayValues} label={t('stats.decayScore')} color="#f59e0b" />
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 'var(--space-2)' }}>{t('stats.decayScore')}</div>
+              <Histogram values={decayValues} color="#f59e0b" />
             </div>
             <div style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', padding: 'var(--space-3)', border: '1px solid var(--color-border-subtle)' }}>
-              <Histogram values={confidenceValues} label={t('stats.confidence')} color="#22c55e" />
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 'var(--space-2)' }}>{t('stats.confidence')}</div>
+              <Histogram values={confidenceValues} color="#22c55e" />
             </div>
           </div>
+          )}
         </div>
       )}
 

@@ -34,9 +34,11 @@ function formatUptime(seconds: number): string {
 }
 
 export default function Settings() {
+  type CollapsibleSection = SectionKey | 'dataManagement';
   const [config, setConfig] = useState<any>(null);
   const [error, setError] = useState('');
   const [editingSection, setEditingSection] = useState<SectionKey | null>(null);
+  const [expandedSection, setExpandedSection] = useState<CollapsibleSection | null>('llm');
   const [draft, setDraft] = useState<any>({});
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [testState, setTestState] = useState<Record<string, { status: 'idle' | 'testing' | 'success' | 'error'; message?: string; latency?: number }>>({});
@@ -152,6 +154,7 @@ export default function Settings() {
           preferenceExtraction: {
             enabled: config.lifecycle?.preferenceExtraction?.enabled ?? false,
             maxNewPreferences: config.lifecycle?.preferenceExtraction?.maxNewPreferences ?? 5,
+            duplicateAuditEnabled: config.lifecycle?.preferenceExtraction?.duplicateAuditEnabled ?? false,
           },
         };
       },
@@ -247,12 +250,20 @@ export default function Settings() {
     }
 
     setDraft(d);
+    setExpandedSection(section);
     setEditingSection(section);
   };
 
   const cancelEdit = () => {
     setEditingSection(null);
     setDraft({});
+  };
+
+  const toggleSection = (section: CollapsibleSection) => {
+    if (editingSection === section) {
+      cancelEdit();
+    }
+    setExpandedSection((prev) => prev === section ? null : section);
   };
 
   const saveSection = async (section: SectionKey) => {
@@ -415,6 +426,7 @@ export default function Settings() {
             ...(config.lifecycle?.preferenceExtraction ?? {}),
             enabled: draft.preferenceExtraction?.enabled ?? false,
             maxNewPreferences: Number(draft.preferenceExtraction?.maxNewPreferences ?? 5),
+            duplicateAuditEnabled: draft.preferenceExtraction?.duplicateAuditEnabled ?? false,
           },
         };
       } else if (section === 'layers') {
@@ -505,18 +517,26 @@ export default function Settings() {
   // ─── Shared UI helpers ─────────────────────────────────────────────────────
 
   const sectionHeader = (title: string, section: SectionKey) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-      <h3>{title}</h3>
-      {isEditing(section) ? (
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn" onClick={cancelEdit}>{t('common.cancel')}</button>
-          <button className="btn primary" onClick={() => saveSection(section)}>{t('common.save')}</button>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+      <div>
+        <h3>{title}</h3>
+        <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 4, lineHeight: 1.5 }}>
+          {sectionSummary(section)}
         </div>
-      ) : (
-        <button className="btn" onClick={() => startEdit(section)} disabled={editingSection !== null && editingSection !== section}>
-          {t('common.edit')}
-        </button>
-      )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        {renderSectionToggle(section, expandedSection === section)}
+        {isEditing(section) ? (
+          <>
+            <button className="btn" onClick={cancelEdit}>{t('common.cancel')}</button>
+            <button className="btn primary" onClick={() => saveSection(section)}>{t('common.save')}</button>
+          </>
+        ) : (
+          <button className="btn" onClick={() => startEdit(section)} disabled={editingSection !== null && editingSection !== section}>
+            {t('common.edit')}
+          </button>
+        )}
+      </div>
     </div>
   );
 
@@ -969,6 +989,51 @@ export default function Settings() {
   if (error) return <div className="card" style={{ color: 'var(--color-danger)' }}>{t('common.errorPrefix', { message: error })}</div>;
   if (!config) return <div className="loading">{t('common.loading')}</div>;
 
+  const sectionSummary = (section: CollapsibleSection): string => {
+    const summaryMap: Record<CollapsibleSection, string> = {
+      llm: t('settings.llmEmbeddingSummary'),
+      search: t('settings.searchTitleSummary'),
+      lifecycle: t('settings.lifecycleTitleSummary'),
+      layers: t('settings.layersTitleSummary'),
+      gate: t('settings.gateTitleSummary'),
+      sieve: t('settings.sieveTitleSummary'),
+      markdownExport: t('settings.markdownExportTitleSummary'),
+      auth: t('settings.authSectionSummary'),
+      selfImprovement: t('settings.selfImprovementTitleSummary'),
+      dataManagement: t('settings.dataManagementSummary'),
+    };
+    return summaryMap[section];
+  };
+
+  const renderCollapsedCard = (title: string, section: CollapsibleSection) => (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ margin: 0 }}>{title}</h3>
+          <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 6, lineHeight: 1.5 }}>
+            {sectionSummary(section)}
+          </div>
+        </div>
+        {renderSectionToggle(section, false)}
+      </div>
+    </div>
+  );
+
+  const renderSectionToggle = (section: CollapsibleSection, expanded: boolean) => (
+    <button className={`btn settings-section-trigger ${expanded ? 'expanded' : ''}`} onClick={() => toggleSection(section)}>
+      <span className="settings-section-trigger-label">
+        {expanded ? t('settings.collapseSection') : t('settings.expandSection')}
+      </span>
+      <span className={`settings-section-toggle-icon ${expanded ? 'open' : ''}`} aria-hidden="true">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 6l4 4 4-4" />
+        </svg>
+      </span>
+    </button>
+  );
+
+  const shouldRenderSection = (section: CollapsibleSection) => expandedSection === section || isEditing(section as SectionKey);
+
   return (
     <div>
       <h1 className="page-title">{t('settings.title')}</h1>
@@ -1044,120 +1109,171 @@ export default function Settings() {
         </div>
       </div>
 
-      <LlmSection
-        config={config}
-        editing={isEditing('llm')}
-        sectionHeader={sectionHeader}
-        renderProviderBlock={renderProviderBlock}
-        testState={testState}
-        handleTestLLM={handleTestLLM}
-        handleTestEmbedding={handleTestEmbedding}
-        handleTestReranker={handleTestReranker}
-        t={t}
-      />
+      {shouldRenderSection('llm') ? (
+        <div className="settings-section-open">
+          <LlmSection
+            config={config}
+            editing={isEditing('llm')}
+            sectionHeader={sectionHeader}
+            renderProviderBlock={renderProviderBlock}
+            testState={testState}
+            handleTestLLM={handleTestLLM}
+            handleTestEmbedding={handleTestEmbedding}
+            handleTestReranker={handleTestReranker}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.llmEmbedding'), 'llm')}
 
-      <SearchSection
-        config={config}
-        editing={isEditing('search')}
-        draft={draft}
-        setDraft={setDraft}
-        sectionHeader={sectionHeader}
-        displayRow={displayRow}
-        renderToggleField={renderToggleField}
-        renderLinkedWeights={renderLinkedWeights}
-        renderDuration={renderDuration}
-        humanizeDuration={humanizeDuration}
-        t={t}
-      />
+      {shouldRenderSection('search') ? (
+        <div className="settings-section-open">
+          <SearchSection
+            config={config}
+            editing={isEditing('search')}
+            draft={draft}
+            setDraft={setDraft}
+            sectionHeader={sectionHeader}
+            displayRow={displayRow}
+            renderToggleField={renderToggleField}
+            renderLinkedWeights={renderLinkedWeights}
+            renderDuration={renderDuration}
+            humanizeDuration={humanizeDuration}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.searchTitle'), 'search')}
 
-      <LifecycleSection
-        config={config}
-        editing={isEditing('lifecycle')}
-        sectionHeader={sectionHeader}
-        displayRow={displayRow}
-        renderSchedule={renderSchedule}
-        renderToggleField={renderToggleField}
-        renderNumberField={renderNumberField}
-        renderSlider={renderSlider}
-        humanizeCron={humanizeCron}
-        t={t}
-      />
+      {shouldRenderSection('lifecycle') ? (
+        <div className="settings-section-open">
+          <LifecycleSection
+            config={config}
+            editing={isEditing('lifecycle')}
+            sectionHeader={sectionHeader}
+            displayRow={displayRow}
+            renderSchedule={renderSchedule}
+            renderToggleField={renderToggleField}
+            renderNumberField={renderNumberField}
+            renderSlider={renderSlider}
+            humanizeCron={humanizeCron}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.lifecycleTitle'), 'lifecycle')}
 
-      <LayersSection
-        config={config}
-        editing={isEditing('layers')}
-        sectionHeader={sectionHeader}
-        displayRow={displayRow}
-        renderDuration={renderDuration}
-        renderNumberField={renderNumberField}
-        renderToggleField={renderToggleField}
-        humanizeDuration={humanizeDuration}
-        t={t}
-      />
+      {shouldRenderSection('layers') ? (
+        <div className="settings-section-open">
+          <LayersSection
+            config={config}
+            editing={isEditing('layers')}
+            sectionHeader={sectionHeader}
+            displayRow={displayRow}
+            renderDuration={renderDuration}
+            renderNumberField={renderNumberField}
+            renderToggleField={renderToggleField}
+            humanizeDuration={humanizeDuration}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.layersTitle'), 'layers')}
 
-      <GateSection
-        config={config}
-        editing={isEditing('gate')}
-        draft={draft}
-        setDraft={setDraft}
-        sectionHeader={sectionHeader}
-        displayRow={displayRow}
-        renderNumberField={renderNumberField}
-        renderToggleField={renderToggleField}
-        t={t}
-      />
+      {shouldRenderSection('gate') ? (
+        <div className="settings-section-open">
+          <GateSection
+            config={config}
+            editing={isEditing('gate')}
+            draft={draft}
+            setDraft={setDraft}
+            sectionHeader={sectionHeader}
+            displayRow={displayRow}
+            renderNumberField={renderNumberField}
+            renderToggleField={renderToggleField}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.gateTitle'), 'gate')}
 
-      <SieveSection
-        config={config}
-        editing={isEditing('sieve')}
-        sectionHeader={sectionHeader}
-        displayRow={displayRow}
-        renderToggleField={renderToggleField}
-        renderNumberField={renderNumberField}
-        renderSlider={renderSlider}
-        t={t}
-      />
+      {shouldRenderSection('sieve') ? (
+        <div className="settings-section-open">
+          <SieveSection
+            config={config}
+            editing={isEditing('sieve')}
+            sectionHeader={sectionHeader}
+            displayRow={displayRow}
+            renderToggleField={renderToggleField}
+            renderNumberField={renderNumberField}
+            renderSlider={renderSlider}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.sieveTitle'), 'sieve')}
 
-      <SelfImprovementSection
-        config={config}
-        editing={isEditing('selfImprovement')}
-        sectionHeader={sectionHeader}
-        displayRow={displayRow}
-        renderToggleField={renderToggleField}
-        renderSlider={renderSlider}
-        renderNumberField={renderNumberField}
-        t={t}
-      />
+      {shouldRenderSection('selfImprovement') ? (
+        <div className="settings-section-open">
+          <SelfImprovementSection
+            config={config}
+            editing={isEditing('selfImprovement')}
+            sectionHeader={sectionHeader}
+            displayRow={displayRow}
+            renderToggleField={renderToggleField}
+            renderSlider={renderSlider}
+            renderNumberField={renderNumberField}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.selfImprovementTitle'), 'selfImprovement')}
 
-      <MarkdownExportSection
-        config={config}
-        editing={isEditing('markdownExport')}
-        sectionHeader={sectionHeader}
-        displayRow={displayRow}
-        renderToggleField={renderToggleField}
-        renderNumberField={renderNumberField}
-        draft={draft}
-        updateDraft={updateDraft}
-        t={t}
-      />
+      {shouldRenderSection('markdownExport') ? (
+        <div className="settings-section-open">
+          <MarkdownExportSection
+            config={config}
+            editing={isEditing('markdownExport')}
+            sectionHeader={sectionHeader}
+            displayRow={displayRow}
+            renderToggleField={renderToggleField}
+            renderNumberField={renderNumberField}
+            draft={draft}
+            updateDraft={updateDraft}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.markdownExportTitle'), 'markdownExport')}
 
-      {/* Auth Section */}
-      <div style={{
-        background: 'var(--color-elevated)', borderRadius: 'var(--radius-lg)',
-        border: '1px solid var(--color-border)', padding: 20, marginBottom: 20,
-      }}>
-        <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>
-          🔐 {t('settings.authSection')}
-        </h3>
-        <AuthSection />
-      </div>
+      {shouldRenderSection('auth') ? (
+        <div className="card settings-section-open">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+            <div>
+              <h3>{t('settings.authSection')}</h3>
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 4, lineHeight: 1.5 }}>
+                {sectionSummary('auth')}
+              </div>
+            </div>
+            {renderSectionToggle('auth', true)}
+          </div>
+          <AuthSection />
+        </div>
+      ) : renderCollapsedCard(t('settings.authSection'), 'auth')}
 
-      <DataManagement
-        config={config}
-        setConfig={setConfig}
-        setToast={setToast}
-        t={t}
-      />
+      {shouldRenderSection('dataManagement') ? (
+        <div className="settings-section-open">
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <h3>{t('settings.dataManagement')}</h3>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 4, lineHeight: 1.5 }}>
+                  {sectionSummary('dataManagement')}
+                </div>
+              </div>
+              {renderSectionToggle('dataManagement', true)}
+            </div>
+          </div>
+          <DataManagement
+            config={config}
+            setConfig={setConfig}
+            setToast={setToast}
+            t={t}
+          />
+        </div>
+      ) : renderCollapsedCard(t('settings.dataManagement'), 'dataManagement')}
     </div>
   );
 }

@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { lazy, Suspense, useEffect, useState, useCallback, startTransition } from 'react';
 import { listMemories, createMemory, updateMemory, deleteMemory, search, triggerImport, listAgents, submitMemoryFeedback } from '../api/client.js';
-import MemoryDetail from './MemoryDetail.js';
 import { useI18n } from '../i18n/index.js';
 import { toLocal } from '../utils/time.js';
+
+const loadMemoryDetail = () => import('./MemoryDetail.js');
+const MemoryDetail = lazy(loadMemoryDetail);
 
 interface Memory {
   id: string;
@@ -323,7 +325,9 @@ export default function MemoryBrowser() {
       )}
 
       {detailId ? (
-        <MemoryDetail memoryId={detailId} onBack={() => { setDetailId(null); load(); }} />
+        <Suspense fallback={<div className="empty">{t('common.loading')}</div>}>
+          <MemoryDetail memoryId={detailId} onBack={() => { startTransition(() => setDetailId(null)); load(); }} />
+        </Suspense>
       ) : (
       <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -367,6 +371,7 @@ export default function MemoryBrowser() {
         <select value={auditFilter} onChange={e => { setAuditFilter(e.target.value); setPage(0); }}>
           <option value="">{t('memories.allAuditStates') || '全部审计状态'}</option>
           <option value="possible_conflict">{t('memories.auditPossibleConflict') || '可能冲突'}</option>
+          <option value="duplicate_preference">{t('memories.auditDuplicatePreference') || '重复偏好'}</option>
         </select>
         <select value={versionFilter} onChange={e => { setVersionFilter(e.target.value); setPage(0); }}>
           <option value="">{t('memories.allMemories')}</option>
@@ -460,6 +465,11 @@ export default function MemoryBrowser() {
                     {t('memories.auditPossibleConflict') || '可能冲突'}
                   </span>
                 ) : null}
+                {auditFlag === 'duplicate_preference' ? (
+                  <span className="badge" style={{ background: 'rgba(249,115,22,0.18)', color: '#c2410c' }}>
+                    {t('memories.auditDuplicatePreference') || '重复偏好'}
+                  </span>
+                ) : null}
                 {isSearchMode && scoreMap[m.id] !== undefined && (
                   <span className={`score-pill ${scoreMap[m.id]! > 0.3 ? 'high' : scoreMap[m.id]! > 0.1 ? 'medium' : 'low'}`}>
                     {scoreMap[m.id]!.toFixed(3)}
@@ -500,7 +510,15 @@ export default function MemoryBrowser() {
                       </button>
                     ))}
                   </div>
-                  <button className="btn" onClick={() => setDetailId(m.id)} style={{ fontSize: 12 }}>{t('common.view')}</button>
+                  <button
+                    className="btn"
+                    onMouseEnter={() => { void loadMemoryDetail(); }}
+                    onFocus={() => { void loadMemoryDetail(); }}
+                    onClick={() => startTransition(() => setDetailId(m.id))}
+                    style={{ fontSize: 12 }}
+                  >
+                    {t('common.view')}
+                  </button>
                   <button className="btn" onClick={() => setEditing({ ...m })}>{t('common.edit')}</button>
                   <button className="btn danger" onClick={() => handleDelete(m.id)}>{t('common.delete')}</button>
                 </div>

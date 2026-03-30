@@ -203,6 +203,8 @@ describe('LifecycleEngine', () => {
     expect(typeof stats.archiveCandidates).toBe('number');
     expect(typeof stats.lowConfidenceCount).toBe('number');
     expect(Array.isArray(stats.categoryStats)).toBe(true);
+    expect(stats.preferenceExtraction).toBeDefined();
+    expect(typeof stats.preferenceExtraction.totalPreferences).toBe('number');
     expect(stats.analysis).toBeDefined();
     expect(typeof stats.analysis.recommendation.shouldAdjust).toBe('boolean');
     expect(Array.isArray(stats.analysis.recommendation.reasons)).toBe(true);
@@ -256,5 +258,167 @@ describe('LifecycleEngine', () => {
     `).all() as any[];
     expect(created.length).toBeGreaterThanOrEqual(1);
     expect(created[0].content).toContain('async');
+
+    const lifecycleLog = getDb().prepare(`
+      SELECT * FROM lifecycle_log
+      WHERE action = 'preference_extracted'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as any;
+    const details = JSON.parse(lifecycleLog.details);
+    expect(details.source_memory_count).toBeGreaterThanOrEqual(1);
+    expect(details.confidence).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it('should expose preference extraction quality checks in lifecycle stats', () => {
+    const prefConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        preferenceExtraction: {
+          enabled: true,
+          lookbackDays: 7,
+          maxNewPreferences: 3,
+          maxLLMCalls: 2,
+          dedupSimilarity: 0.85,
+        },
+      },
+    });
+
+    const prefLifecycle = new LifecycleEngine(createMockLLM(), createMockEmbedding(), createMockVector(), prefConfig);
+
+    insertMemory({
+      id: 'pref-quality-source',
+      layer: 'core',
+      category: 'fact',
+      content: 'User asked for async updates instead of meetings.',
+      agent_id: 'pref-quality',
+      confidence: 0.9,
+      importance: 0.7,
+      decay_score: 0.9,
+    });
+    insertMemory({
+      id: 'pref-quality-1',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers async updates.',
+      agent_id: 'pref-quality',
+      confidence: 0.72,
+      importance: 0.75,
+      decay_score: 0.9,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        source_memories: ['pref-quality-source', 'pref-quality-missing'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+    insertMemory({
+      id: 'pref-quality-2',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers async updates!',
+      agent_id: 'pref-quality',
+      confidence: 0.83,
+      importance: 0.75,
+      decay_score: 0.9,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        source_memories: ['pref-quality-source'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+
+    const stats = prefLifecycle.getStats('pref-quality');
+    expect(stats.preferenceExtraction.enabled).toBe(true);
+    expect(stats.preferenceExtraction.totalPreferences).toBeGreaterThanOrEqual(2);
+    expect(stats.preferenceExtraction.lifecycleExtractedTotal).toBeGreaterThanOrEqual(2);
+    expect(stats.preferenceExtraction.recentExtracted).toBeGreaterThanOrEqual(2);
+    expect(stats.preferenceExtraction.lowConfidenceRecent).toBeGreaterThanOrEqual(1);
+    expect(stats.preferenceExtraction.missingSourceRecent).toBeGreaterThanOrEqual(1);
+    expect(stats.preferenceExtraction.duplicateGroups).toBeGreaterThanOrEqual(1);
+    expect(stats.preferenceExtraction.duplicateSamples[0]?.count).toBeGreaterThanOrEqual(2);
+    expect(stats.preferenceExtraction.recentItems.some((item) => item.missingSourceMemoryCount > 0)).toBe(true);
+    expect(stats.preferenceExtraction.recentItems.some((item) => item.duplicateCount > 1)).toBe(true);
+  });
+
+  it('should flag duplicate preferences in flag-only mode', async () => {
+    const prefConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        preferenceExtraction: {
+          enabled: true,
+          lookbackDays: 7,
+          maxNewPreferences: 3,
+          maxLLMCalls: 2,
+          dedupSimilarity: 0.85,
+          duplicateAuditEnabled: true,
+        },
+      },
+    });
+
+    const prefLifecycle = new LifecycleEngine(createMockLLM(), createMockEmbedding(), createMockVector(), prefConfig);
+
+    insertMemory({
+      id: 'pref-dup-1',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers async updates.',
+      agent_id: 'pref-dup',
+      confidence: 0.82,
+      importance: 0.75,
+      decay_score: 0.9,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        source_memories: ['pref-dup-src-1'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+    insertMemory({
+      id: 'pref-dup-2',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers async updates!',
+      agent_id: 'pref-dup',
+      confidence: 0.8,
+      importance: 0.75,
+      decay_score: 0.9,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        source_memories: ['pref-dup-src-2'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+
+    const report = await prefLifecycle.run(false, 'manual', 'pref-dup');
+    expect(report.preferenceDuplicatesFlagged).toBeGreaterThanOrEqual(2);
+    expect(report.observability.phases.some((p) => p.key === 'auditPreferenceDuplicates')).toBe(true);
+
+    const updated1 = getMemoryById('pref-dup-1')!;
+    const updated2 = getMemoryById('pref-dup-2')!;
+    expect(updated1.metadata).toContain('duplicate_preference');
+    expect(updated2.metadata).toContain('duplicate_preference');
+
+    const lifecycleLog = getDb().prepare(`
+      SELECT * FROM lifecycle_log
+      WHERE action = 'preference_duplicate_flagged'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as any;
+    expect(lifecycleLog).toBeTruthy();
+    const details = JSON.parse(lifecycleLog.details);
+    expect(details.count).toBeGreaterThanOrEqual(2);
   });
 });

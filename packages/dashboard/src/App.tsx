@@ -1,18 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, useNavigate } from 'react-router-dom';
-import Stats from './pages/Stats.js';
-import MemoryBrowser from './pages/MemoryBrowser.js';
-import SearchDebug from './pages/SearchDebug.js';
-import RelationGraph from './pages/RelationGraph.js';
-import LifecycleMonitor from './pages/LifecycleMonitor.js';
-import Settings from './pages/Settings/index.js';
-import Agents from './pages/Agents.js';
-import AgentDetail from './pages/AgentDetail.js';
-import ExtractionLogs from './pages/ExtractionLogs.js';
-import SystemLogs from './pages/SystemLogs.js';
 import { search, checkAuth, verifyToken, setStoredToken, getStoredToken, clearStoredToken, getHealth, triggerUpdate } from './api/client.js';
 import { I18nProvider, useI18n } from './i18n/index.js';
 import type { Locale } from './i18n/index.js';
+
+const Stats = lazy(() => import('./pages/Stats.js'));
+const MemoryBrowser = lazy(() => import('./pages/MemoryBrowser.js'));
+const RelationGraph = lazy(() => import('./pages/RelationGraph.js'));
+const LifecycleMonitor = lazy(() => import('./pages/LifecycleMonitor.js'));
+const Settings = lazy(() => import('./pages/Settings/index.js'));
+const Agents = lazy(() => import('./pages/Agents.js'));
+const AgentDetail = lazy(() => import('./pages/AgentDetail.js'));
+const ExtractionLogs = lazy(() => import('./pages/ExtractionLogs.js'));
+const SystemLogs = lazy(() => import('./pages/SystemLogs.js'));
 
 // ============ Theme Management ============
 
@@ -381,6 +381,16 @@ function AppContent() {
   const [checkMsg, setCheckMsg] = useState<string|null>(null);
   const { theme, toggle: toggleTheme } = useTheme();
 
+  const pageFallback = (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      minHeight: '50vh', color: 'var(--color-text-tertiary)', fontSize: 14, gap: 10,
+    }}>
+      <span className="spinner" />
+      {t('common.loading')}
+    </div>
+  );
+
   useEffect(() => {
     // Check auth status (new endpoint with setup detection)
     fetch('/api/v1/auth/status').then(r => r.json()).then(async (status: any) => {
@@ -715,18 +725,20 @@ function AppContent() {
       </aside>
 
       <main className="main">
-        <Routes>
-          <Route path="/" element={<Stats />} />
-          <Route path="/memories" element={<MemoryBrowser />} />
-          <Route path="/agents" element={<Agents />} />
-          <Route path="/agents/:id" element={<AgentDetail />} />
-          {/* SearchDebug removed — use MemoryBrowser search or Stats recall test */}
-          <Route path="/relations" element={<RelationGraph />} />
-          <Route path="/extraction-logs" element={<ExtractionLogs />} />
-          <Route path="/system-logs" element={<SystemLogs />} />
-          <Route path="/lifecycle" element={<LifecycleMonitor />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
+        <Suspense fallback={pageFallback}>
+          <Routes>
+            <Route path="/" element={<Stats />} />
+            <Route path="/memories" element={<MemoryBrowser />} />
+            <Route path="/agents" element={<Agents />} />
+            <Route path="/agents/:id" element={<AgentDetail />} />
+            {/* SearchDebug removed — use MemoryBrowser search or Stats recall test */}
+            <Route path="/relations" element={<RelationGraph />} />
+            <Route path="/extraction-logs" element={<ExtractionLogs />} />
+            <Route path="/system-logs" element={<SystemLogs />} />
+            <Route path="/lifecycle" element={<LifecycleMonitor />} />
+            <Route path="/settings" element={<Settings />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   );

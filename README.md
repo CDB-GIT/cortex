@@ -125,9 +125,12 @@ Conversation ──→ Fast Channel (regex, 0ms) ──→ Merge ──→ 4-tie
 Every memory, searchable. Every extraction, auditable.
 
 - Memory browser with search, filter by category/status/agent
+- Duplicate preference review hint in Memory Detail
+  Open a memory flagged as `duplicate_preference`, then use `View Suggestion` inside Memory Detail to see the recommended keeper and comparison table
 - Search debugger — see BM25/vector/fusion scores for every query
 - Extraction logs — what was extracted, why, confidence scores
 - Lifecycle preview — dry-run promotion/decay before it happens
+- System Logs — in dev mode, recent server logs are also visible from the in-memory ring buffer
 - Relation graph — interactive knowledge graph visualization (sigma.js)
 - Multi-agent management with per-agent config
 - One-click updates with version detection

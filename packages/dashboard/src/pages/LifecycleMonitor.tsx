@@ -135,6 +135,8 @@ export default function LifecycleMonitor() {
       'archive': t('lifecycle.archiveLabel') || '📦 归档',
       'merge': t('lifecycle.mergeLabel') || '🔗 合并',
       'compress': t('lifecycle.compressLabel') || '📐 压缩',
+      'preference_extracted': t('lifecycle.phasePreferenceExtraction') || '🪄 偏好提取',
+      'preference_duplicate_flagged': t('lifecycle.phasePreferenceDuplicateAudit') || '⚑ 重复偏好打标',
       'contradiction_audit_flagged': t('lifecycle.auditLabel') || '⚑ 审计打标',
     };
     return map[action] || action;
@@ -148,6 +150,8 @@ export default function LifecycleMonitor() {
       'archive': 'rgba(251,191,36,0.7)',
       'merge': 'rgba(56,189,248,0.7)',
       'compress': 'rgba(168,85,247,0.7)',
+      'preference_extracted': 'rgba(45,212,191,0.75)',
+      'preference_duplicate_flagged': 'rgba(249,115,22,0.75)',
       'contradiction_audit_flagged': 'rgba(244,114,182,0.75)',
     };
     return map[action] || 'rgba(99,102,241,0.3)';
@@ -172,6 +176,8 @@ export default function LifecycleMonitor() {
         const parts: string[] = [];
         if (triggerLabel) parts.push(triggerLabel);
         if (d.promoted) parts.push(`升级 ${d.promoted}`);
+        if (d.preferencesExtracted) parts.push(`偏好 ${d.preferencesExtracted}`);
+        if (d.preferenceDuplicatesFlagged) parts.push(`重复偏好 ${d.preferenceDuplicatesFlagged}`);
         if (d.merged) parts.push(`合并 ${d.merged}`);
         if (d.archived) parts.push(`归档 ${d.archived}`);
         if (d.expiredWorking) parts.push(`清理 ${d.expiredWorking}`);
@@ -181,6 +187,16 @@ export default function LifecycleMonitor() {
           return `${triggerLabel} 无变更`;
         }
         return parts.join(' · ');
+      }
+      if (action === 'preference_extracted') {
+        const parts: string[] = [];
+        if (d.source_memory_count != null) parts.push(`来源 ${d.source_memory_count} 条`);
+        if (d.confidence != null) parts.push(`置信 ${Number(d.confidence).toFixed(2)}`);
+        return parts.join(' · ') || '\u2014';
+      }
+      if (action === 'preference_duplicate_flagged') {
+        if (d.count != null) return `重复 ${d.count} 条`;
+        return '\u2014';
       }
       if (d.score) return `分数 ${Number(d.score).toFixed(2)}`;
       if (d.decay_score) return `衰减 ${Number(d.decay_score).toFixed(2)}`;
@@ -205,6 +221,7 @@ export default function LifecycleMonitor() {
       cleanExpiredWorking: t('lifecycle.phaseCleanExpired') || '清理过期 Working',
       promoteToCore: t('lifecycle.phasePromote') || '晋升到 Core',
       extractPreferences: t('lifecycle.phasePreferenceExtraction') || '主动偏好提取',
+      auditPreferenceDuplicates: t('lifecycle.phasePreferenceDuplicateAudit') || '重复偏好审计',
       deduplicateCore: t('lifecycle.phaseDeduplicate') || 'Core 去重',
       archiveStale: t('lifecycle.phaseArchive') || '归档陈旧记忆',
       compressArchive: t('lifecycle.phaseCompress') || 'Archive 压缩回流',
@@ -219,6 +236,7 @@ export default function LifecycleMonitor() {
   };
 
   const categoryStats = (lifecycleStats?.categoryStats || []).slice(0, 8);
+  const preferenceStats = lifecycleStats?.preferenceExtraction;
   const recommendation = lifecycleStats?.analysis?.recommendation;
   const topAffectedCategories = recommendation?.topAffectedCategories || [];
 
@@ -397,6 +415,122 @@ export default function LifecycleMonitor() {
         </div>
       )}
 
+      {preferenceStats && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <h3 style={{ marginBottom: 12 }}>{t('lifecycle.preferenceQualityTitle') || '偏好提取质量检查'}</h3>
+          <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', marginBottom: 12 }}>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceTotal') || '当前偏好总数'}</div>
+              <div className="value">{preferenceStats.totalPreferences ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceLifecycleTotal') || 'Lifecycle 提取累计'}</div>
+              <div className="value">{preferenceStats.lifecycleExtractedTotal ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceRecentExtracted') || '最近窗口新增偏好'}</div>
+              <div className="value">{preferenceStats.recentExtracted ?? 0}</div>
+              <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>{preferenceStats.recentWindowDays}d</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceDuplicateGroups') || '重复偏好组'}</div>
+              <div className="value">{preferenceStats.duplicateGroups ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceMissingSources') || '来源异常'}</div>
+              <div className="value">{preferenceStats.missingSourceRecent ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.lowConfidence') || '低置信度记忆'}</div>
+              <div className="value">{preferenceStats.lowConfidenceRecent ?? 0}</div>
+              <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>
+                {'<'} {preferenceStats.thresholds?.lowConfidenceThreshold ?? 0.75}
+              </div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceAvgSources') || '平均来源数'}</div>
+              <div className="value">{preferenceStats.averageSourceMemories ?? 0}</div>
+            </div>
+          </div>
+
+          {preferenceStats.recentItems?.length === 0 ? (
+            <div style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>
+              {t('lifecycle.preferenceNoRecent') || '最近窗口内还没有 lifecycle 新提取的 preference。'}
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch', marginBottom: preferenceStats.duplicateSamples?.length > 0 ? 12 : 0 }}>
+              <table style={{ fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th>{t('lifecycle.contentCol') || '内容'}</th>
+                    <th>{t('lifecycle.sourceMemoryCount') || '来源记忆数'}</th>
+                    <th>{t('lifecycle.confidence') || '置信度'}</th>
+                    <th>{t('lifecycle.issuesCol') || '问题'}</th>
+                    <th>{t('lifecycle.createdAtCol') || '创建时间'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preferenceStats.recentItems.map((item: any) => {
+                    const issues: string[] = [];
+                    if (item.sourceMemoryCount === 0 || item.missingSourceMemoryCount > 0) {
+                      issues.push(t('lifecycle.qualityIssueMissingSource') || '来源缺失');
+                    }
+                    if ((item.confidence ?? 0) < (preferenceStats.thresholds?.lowConfidenceThreshold ?? 0.75)) {
+                      issues.push(t('lifecycle.qualityIssueLowConfidence') || '低置信度');
+                    }
+                    if ((item.duplicateCount ?? 0) > 1) {
+                      issues.push(t('lifecycle.qualityIssueDuplicate') || '重复候选');
+                    }
+
+                    return (
+                      <tr key={item.id}>
+                        <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.content}</td>
+                        <td>
+                          {item.sourceMemoryCount}
+                          {item.missingSourceMemoryCount > 0 ? ` (-${item.missingSourceMemoryCount})` : ''}
+                        </td>
+                        <td>{Number(item.confidence ?? 0).toFixed(2)}</td>
+                        <td>{issues.join(' · ') || '\u2014'}</td>
+                        <td style={{ whiteSpace: 'nowrap' }}>{toLocal(item.createdAt)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {preferenceStats.duplicateSamples?.length > 0 && (
+            <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch', marginBottom: 12 }}>
+              <table style={{ fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th>{t('lifecycle.preferenceDuplicateSamples') || '重复样本'}</th>
+                    <th>{t('lifecycle.preferenceDuplicateGroups') || '重复偏好组'}</th>
+                    <th>{t('lifecycle.memoryIds') || '记忆 ID'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preferenceStats.duplicateSamples.map((sample: any) => (
+                    <tr key={`${sample.content}-${sample.count}`}>
+                      <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sample.content}</td>
+                      <td>{sample.count}</td>
+                      <td style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sample.memoryIds.join(', ')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {preferenceStats.duplicateGroups === 0 && preferenceStats.missingSourceRecent === 0 && preferenceStats.lowConfidenceRecent === 0 && (
+            <div style={{ fontSize: 13, color: 'var(--color-success)' }}>
+              {t('lifecycle.qualityHealthy') || '当前未发现明显质量问题'}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Agent selector + Actions */}
       <div className="toolbar" style={{ flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -519,6 +653,7 @@ export default function LifecycleMonitor() {
           <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))' }}>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.promoted')}</div><div className="value">{runResult.promoted}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.preferencesExtracted') || '偏好提取'}</div><div className="value">{runResult.preferencesExtracted ?? 0}</div></div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.preferenceDuplicatesFlagged') || '重复偏好打标'}</div><div className="value">{runResult.preferenceDuplicatesFlagged ?? 0}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.merged')}</div><div className="value">{runResult.merged}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.archived')}</div><div className="value">{runResult.archived}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.compressed')}</div><div className="value">{runResult.compressedToCore}</div></div>
