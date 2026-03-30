@@ -1,0 +1,142 @@
+{
+  "enabled": true,
+  "port": 21100,
+  "host": "127.0.0.1",
+  "auth": {},
+  "cors": {
+    "origin": false
+  },
+  "rateLimit": {
+    "enabled": true,
+    "windowMs": 60000,
+    "maxRequests": 120
+  },
+  "storage": {
+    "dbPath": "cortex/brain.db",
+    "walMode": true
+  },
+  "llm": {
+    "extraction": {
+      "provider": "openai",
+      "model": "gpt-4o"
+    },
+    "lifecycle": {
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    }
+  },
+  "embedding": {
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "dimensions": 1536
+  },
+  "vectorBackend": {
+    "provider": "sqlite-vec"
+  },
+  "layers": {
+    "working": {
+      "ttl": "48h"
+    },
+    "core": {
+      "maxEntries": 1000
+    },
+    "archive": {
+      "ttl": "90d",
+      "compressBackToCore": true
+    }
+  },
+  "gate": {
+    "maxInjectionTokens": 1000,
+    "fixedInjectionTokens": 500,
+    "skipSmallTalk": true,
+    "searchLimit": 15,
+    "layerWeights": {
+      "core": 1,
+      "working": 0.8,
+      "archive": 0.5
+    },
+    "queryExpansion": {
+      "enabled": true,
+      "maxVariants": 3
+    },
+    "relationInjection": true,
+    "relationBudget": 100,
+    "cliffAbsolute": 0.55,
+    "cliffGap": 0.75,
+    "cliffFloor": 0.05,
+    "recallTimeoutMs": 5000
+  },
+  "sieve": {
+    "highSignalImmediate": true,
+    "fastChannelEnabled": true,
+    "parallelChannels": true,
+    "profileInjection": true,
+    "extractionLogging": true,
+    "extractionLogPreviewCharsPerMessage": 60,
+    "extractionLogPreviewMaxChars": 300,
+    "maxExtractionTokens": 1000,
+    "maxConversationChars": 6000,
+    "contextMessages": 4,
+    "smartUpdate": true,
+    "similarityThreshold": 0.35,
+    "exactDupThreshold": 0.08,
+    "relationExtraction": true,
+    "minImportance": 0.4
+  },
+  "lifecycle": {
+    "schedule": "0 3 * * *",
+    "promotionThreshold": 0.6,
+    "archiveThreshold": 0.2,
+    "decayLambda": 0.03,
+    "contradictionAudit": {
+      "enabled": true,
+      "lookbackDays": 7,
+      "candidateTopK": 5,
+      "maxCandidates": 50,
+      "maxLLMCalls": 10,
+      "lowConfidenceThreshold": 0.4,
+      "minNormalizedSimilarity": 0.75,
+      "mode": "flag_only"
+    },
+    "preferenceExtraction": {
+      "enabled": false,
+      "lookbackDays": 7,
+      "maxNewPreferences": 5,
+      "maxLLMCalls": 3,
+      "dedupSimilarity": 0.85,
+      "duplicateAuditEnabled": true
+    }
+  },
+  "selfImprovement": {
+    "enabled": true,
+    "windowSize": 30,
+    "minFeedbacks": 3,
+    "maxDelta": 0.15,
+    "implicitWeight": 0.3,
+    "explicitWeight": 1,
+    "minDelta": 0.01
+  },
+  "flush": {
+    "enabled": true,
+    "softThresholdTokens": 40000
+  },
+  "search": {
+    "hybrid": true,
+    "vectorWeight": 0.7,
+    "textWeight": 0.3,
+    "minSimilarity": 0.15,
+    "recencyBoostWindow": "7d",
+    "accessBoostCap": 10,
+    "reranker": {
+      "enabled": false,
+      "provider": "none",
+      "topN": 15,
+      "weight": 0.7
+    }
+  },
+  "markdownExport": {
+    "enabled": true,
+    "exportMemoryMd": true,
+    "debounceMs": 300000
+  }
+}

@@ -3,6 +3,14 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_CONTRADICTION_AUDIT_PROMPT_TEMPLATE,
+  DEFAULT_PREFERENCE_EXTRACTION_PROMPT_TEMPLATE,
+  FLUSH_CORE_ITEMS_SYSTEM_PROMPT,
+  FLUSH_HIGHLIGHTS_SYSTEM_PROMPT,
+  SIEVE_SYSTEM_PROMPT,
+  SMART_UPDATE_SYSTEM_PROMPT,
+} from '../core/prompts.js';
 
 const LLMProviderSchema = z.object({
   provider: z.enum(['openai', 'anthropic', 'google', 'gemini', 'deepseek', 'openrouter', 'ollama', 'none']),
@@ -108,12 +116,20 @@ const CortexConfigSchema = z.object({
     exactDupThreshold: z.number().min(0.01).max(0.2).default(0.08),
     relationExtraction: z.boolean().default(true),
     minImportance: z.number().min(0.1).max(0.9).default(0.3), // Fix #9
+    prompts: z.object({
+      extractionSystem: z.string().default(SIEVE_SYSTEM_PROMPT),
+      smartUpdateSystem: z.string().default(SMART_UPDATE_SYSTEM_PROMPT),
+    }).default({}),
   }).default({}),
   lifecycle: z.object({
     schedule: z.string().default('0 3 * * *'),
     promotionThreshold: z.number().default(0.6),
     archiveThreshold: z.number().default(0.2),
     decayLambda: z.number().default(0.03),
+    prompts: z.object({
+      contradictionAudit: z.string().default(DEFAULT_CONTRADICTION_AUDIT_PROMPT_TEMPLATE),
+      preferenceExtraction: z.string().default(DEFAULT_PREFERENCE_EXTRACTION_PROMPT_TEMPLATE),
+    }).default({}),
     contradictionAudit: z.object({
       enabled: z.boolean().default(false),
       lookbackDays: z.number().min(1).max(90).default(7),
@@ -122,7 +138,8 @@ const CortexConfigSchema = z.object({
       maxLLMCalls: z.number().min(1).max(100).default(20),
       lowConfidenceThreshold: z.number().min(0.05).max(0.9).default(0.4),
       minNormalizedSimilarity: z.number().min(0.1).max(0.99).default(0.75),
-      mode: z.enum(['flag_only']).default('flag_only'),
+      autoApplyMinConfidence: z.number().min(0.1).max(1).default(0.75),
+      mode: z.enum(['flag_only', 'auto_timeline_supersede']).default('flag_only'),
     }).default({}),
     preferenceExtraction: z.object({
       enabled: z.boolean().default(false),
@@ -145,6 +162,10 @@ const CortexConfigSchema = z.object({
   flush: z.object({
     enabled: z.boolean().default(true),
     softThresholdTokens: z.number().default(40000),
+    prompts: z.object({
+      highlightsSystem: z.string().default(FLUSH_HIGHLIGHTS_SYSTEM_PROMPT),
+      coreItemsSystem: z.string().default(FLUSH_CORE_ITEMS_SYSTEM_PROMPT),
+    }).default({}),
   }).default({}),
   search: z.object({
     hybrid: z.boolean().default(true),

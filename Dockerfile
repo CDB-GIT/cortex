@@ -38,6 +38,11 @@ RUN pnpm install --frozen-lockfile --prod || pnpm install --prod
 COPY --from=builder /app/packages/server/dist packages/server/dist/
 COPY --from=builder /app/packages/dashboard/dist packages/dashboard/dist/
 
+# Copy a safe starter config into the image as reference.
+# In Docker deployments, runtime changes are typically persisted next to the DB
+# (for example /app/cortex/cortex.json when CORTEX_DB_PATH=cortex/brain.db).
+COPY cortex.json cortex.json.example
+
 ENV NODE_ENV=production
 ENV CORTEX_HOST=0.0.0.0
 ENV CORTEX_PORT=21100

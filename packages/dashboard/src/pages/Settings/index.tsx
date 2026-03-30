@@ -150,6 +150,12 @@ export default function Settings() {
             enabled: config.lifecycle?.contradictionAudit?.enabled ?? false,
             maxLLMCalls: config.lifecycle?.contradictionAudit?.maxLLMCalls ?? 20,
             lowConfidenceThreshold: config.lifecycle?.contradictionAudit?.lowConfidenceThreshold ?? 0.4,
+            mode: config.lifecycle?.contradictionAudit?.mode ?? 'flag_only',
+            autoApplyMinConfidence: config.lifecycle?.contradictionAudit?.autoApplyMinConfidence ?? 0.75,
+          },
+          prompts: {
+            contradictionAudit: config.lifecycle?.prompts?.contradictionAudit ?? '',
+            preferenceExtraction: config.lifecycle?.prompts?.preferenceExtraction ?? '',
           },
           preferenceExtraction: {
             enabled: config.lifecycle?.preferenceExtraction?.enabled ?? false,
@@ -285,12 +291,14 @@ export default function Settings() {
       const dl = Number(draft.decayLambda);
       const maxLlmCalls = Number(draft.contradictionAudit?.maxLLMCalls);
       const lowConfidenceThreshold = Number(draft.contradictionAudit?.lowConfidenceThreshold);
+      const autoApplyMinConfidence = Number(draft.contradictionAudit?.autoApplyMinConfidence);
       const maxNewPreferences = Number(draft.preferenceExtraction?.maxNewPreferences);
       if (isNaN(pt) || pt < 0 || pt > 1) errors.push(t('settings.validationThresholdRange'));
       if (isNaN(at) || at < 0 || at > 1) errors.push(t('settings.validationThresholdRange'));
       if (isNaN(dl) || dl <= 0 || dl > 0.5) errors.push(t('settings.validationDecayRange'));
       if (isNaN(maxLlmCalls) || maxLlmCalls < 1 || maxLlmCalls > 100) errors.push(t('settings.validationPositiveNumber'));
       if (isNaN(lowConfidenceThreshold) || lowConfidenceThreshold < 0.05 || lowConfidenceThreshold > 0.9) errors.push(t('settings.validationThresholdRange'));
+      if (isNaN(autoApplyMinConfidence) || autoApplyMinConfidence < 0.1 || autoApplyMinConfidence > 1) errors.push(t('settings.validationThresholdRange'));
       if (isNaN(maxNewPreferences) || maxNewPreferences < 1 || maxNewPreferences > 20) errors.push(t('settings.validationPositiveNumber'));
       if (draft.customSchedule && draft.schedule && !/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(draft.schedule)) {
         errors.push(t('settings.validationCronFormat'));
@@ -416,11 +424,18 @@ export default function Settings() {
           promotionThreshold: Number(draft.promotionThreshold),
           archiveThreshold: Number(draft.archiveThreshold),
           decayLambda: Number(draft.decayLambda),
+          prompts: {
+            ...(config.lifecycle?.prompts ?? {}),
+            contradictionAudit: String(draft.prompts?.contradictionAudit ?? ''),
+            preferenceExtraction: String(draft.prompts?.preferenceExtraction ?? ''),
+          },
           contradictionAudit: {
             ...(config.lifecycle?.contradictionAudit ?? {}),
             enabled: draft.contradictionAudit?.enabled ?? false,
             maxLLMCalls: Number(draft.contradictionAudit?.maxLLMCalls ?? 20),
             lowConfidenceThreshold: Number(draft.contradictionAudit?.lowConfidenceThreshold ?? 0.4),
+            mode: draft.contradictionAudit?.mode ?? 'flag_only',
+            autoApplyMinConfidence: Number(draft.contradictionAudit?.autoApplyMinConfidence ?? 0.75),
           },
           preferenceExtraction: {
             ...(config.lifecycle?.preferenceExtraction ?? {}),
@@ -694,6 +709,51 @@ export default function Settings() {
           type="number" value={val ?? ''} min={min} max={max}
           onChange={e => updateDraft(path, e.target.value)}
           style={{ width: 160 }}
+        />
+        {fieldDesc(desc)}
+      </div>
+    );
+  };
+
+  const renderSelectField = (
+    label: string,
+    desc: string,
+    path: string,
+    options: Array<{ value: string; label: string }>,
+  ) => {
+    const val = String(getDraftValue(path) ?? options[0]?.value ?? '');
+    return (
+      <div style={{ marginBottom: 20 }}>
+        <label style={{ fontWeight: 500, marginBottom: 6, display: 'block' }}>{label}</label>
+        <select value={val} onChange={e => updateDraft(path, e.target.value)} style={{ width: 'auto', minWidth: 220 }}>
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        {fieldDesc(desc)}
+      </div>
+    );
+  };
+
+  const renderTextareaField = (
+    label: string,
+    desc: string,
+    path: string,
+    rows = 10,
+    action?: React.ReactNode,
+  ) => {
+    const val = String(getDraftValue(path) ?? '');
+    return (
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+          <label style={{ fontWeight: 500, display: 'block' }}>{label}</label>
+          {action}
+        </div>
+        <textarea
+          value={val}
+          rows={rows}
+          onChange={e => updateDraft(path, e.target.value)}
+          style={{ width: '100%', minHeight: rows * 22, fontFamily: 'var(--font-mono)', resize: 'vertical' }}
         />
         {fieldDesc(desc)}
       </div>
@@ -1154,8 +1214,11 @@ export default function Settings() {
             renderSchedule={renderSchedule}
             renderToggleField={renderToggleField}
             renderNumberField={renderNumberField}
+            renderSelectField={renderSelectField}
+            renderTextareaField={renderTextareaField}
             renderSlider={renderSlider}
             humanizeCron={humanizeCron}
+            updateDraft={updateDraft}
             t={t}
           />
         </div>

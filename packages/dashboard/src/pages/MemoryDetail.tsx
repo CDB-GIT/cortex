@@ -55,7 +55,7 @@ interface AuditTimelineMeta {
 
 interface TimelineResolutionMeta {
   resolution_id: string;
-  resolution_type: 'manual_timeline_confirm_current';
+  resolution_type: 'manual_timeline_confirm_current' | 'auto_timeline_keep_current';
   role: 'current' | 'history';
   current_id: string;
   history_id: string;
@@ -340,12 +340,13 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
     if (!meta?.timeline_resolution || typeof meta.timeline_resolution !== 'object') return null;
     const candidate = meta.timeline_resolution as Partial<TimelineResolutionMeta>;
     if (!candidate || (candidate.role !== 'current' && candidate.role !== 'history')) return null;
+    if (candidate.resolution_type !== 'manual_timeline_confirm_current' && candidate.resolution_type !== 'auto_timeline_keep_current') return null;
     if (typeof candidate.resolution_id !== 'string' || typeof candidate.current_id !== 'string' || typeof candidate.history_id !== 'string') {
       return null;
     }
     return {
       resolution_id: candidate.resolution_id,
-      resolution_type: 'manual_timeline_confirm_current',
+      resolution_type: candidate.resolution_type,
       role: candidate.role,
       current_id: candidate.current_id,
       history_id: candidate.history_id,

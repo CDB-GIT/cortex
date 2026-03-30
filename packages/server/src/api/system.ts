@@ -10,6 +10,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateId } from '../utils/helpers.js';
+import {
+  DEFAULT_CONTRADICTION_AUDIT_PROMPT_TEMPLATE,
+  DEFAULT_PREFERENCE_EXTRACTION_PROMPT_TEMPLATE,
+  FLUSH_CORE_ITEMS_SYSTEM_PROMPT,
+  FLUSH_HIGHLIGHTS_SYSTEM_PROMPT,
+  SIEVE_SYSTEM_PROMPT,
+  SMART_UPDATE_SYSTEM_PROMPT,
+} from '../core/prompts.js';
 
 const log = createLogger('system');
 
@@ -404,6 +412,27 @@ export function registerSystemRoutes(app: FastifyInstance, cortex: CortexApp): v
           ...config.search.reranker,
           apiKey: undefined,
           hasApiKey: !!config.search.reranker?.apiKey,
+        },
+      },
+      lifecycle: {
+        ...config.lifecycle,
+        promptDefaults: {
+          contradictionAudit: DEFAULT_CONTRADICTION_AUDIT_PROMPT_TEMPLATE,
+          preferenceExtraction: DEFAULT_PREFERENCE_EXTRACTION_PROMPT_TEMPLATE,
+        },
+      },
+      sieve: {
+        ...config.sieve,
+        promptDefaults: {
+          extractionSystem: SIEVE_SYSTEM_PROMPT,
+          smartUpdateSystem: SMART_UPDATE_SYSTEM_PROMPT,
+        },
+      },
+      flush: {
+        ...config.flush,
+        promptDefaults: {
+          highlightsSystem: FLUSH_HIGHLIGHTS_SYSTEM_PROMPT,
+          coreItemsSystem: FLUSH_CORE_ITEMS_SYSTEM_PROMPT,
         },
       },
     };

@@ -26,7 +26,7 @@ interface DuplicatePreferenceResolutionMeta {
 
 interface TimelineUpdateResolutionMeta {
   resolution_id: string;
-  resolution_type: 'manual_timeline_confirm_current';
+  resolution_type: 'manual_timeline_confirm_current' | 'auto_timeline_keep_current';
   role: 'current' | 'history';
   current_id: string;
   history_id: string;
@@ -214,14 +214,14 @@ function parseTimelineResolution(memory: Memory): TimelineUpdateResolutionMeta |
   const meta = parseMetadata(memory);
   const resolution = meta.timeline_resolution;
   if (!resolution || typeof resolution !== 'object') return null;
-  if (resolution.resolution_type !== 'manual_timeline_confirm_current') return null;
+  if (resolution.resolution_type !== 'manual_timeline_confirm_current' && resolution.resolution_type !== 'auto_timeline_keep_current') return null;
   if (resolution.role !== 'current' && resolution.role !== 'history') return null;
   if (typeof resolution.resolution_id !== 'string' || !resolution.resolution_id.trim()) return null;
   if (typeof resolution.current_id !== 'string' || !resolution.current_id.trim()) return null;
   if (typeof resolution.history_id !== 'string' || !resolution.history_id.trim()) return null;
   return {
     resolution_id: resolution.resolution_id,
-    resolution_type: 'manual_timeline_confirm_current',
+    resolution_type: resolution.resolution_type,
     role: resolution.role,
     current_id: resolution.current_id,
     history_id: resolution.history_id,

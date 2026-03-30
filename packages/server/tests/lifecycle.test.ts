@@ -255,6 +255,10 @@ describe('LifecycleEngine', () => {
       decay_score: 0.9,
       source: 'lifecycle:promotion',
     });
+    const timelineOldAt = new Date(Date.now() - 60_000).toISOString();
+    const timelineNewAt = new Date().toISOString();
+    getDb().prepare('UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?').run(timelineOldAt, timelineOldAt, 'timeline-old');
+    getDb().prepare('UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?').run(timelineNewAt, timelineNewAt, 'timeline-new');
 
     await auditLifecycle.run(false, 'manual', 'timeline-test');
 
@@ -266,6 +270,271 @@ describe('LifecycleEngine', () => {
     expect(updatedOld.audit_timeline_role).toBe('history_candidate');
     expect(updatedNew.audit_current_candidate_id).toBe('timeline-new');
     expect(updatedOld.audit_history_candidate_id).toBe('timeline-old');
+  });
+
+  it('should keep direct conflicts in manual review instead of turning them into timeline updates', async () => {
+    const auditConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        contradictionAudit: {
+          enabled: true,
+          lookbackDays: 30,
+          candidateTopK: 5,
+          maxCandidates: 10,
+          maxLLMCalls: 5,
+          lowConfidenceThreshold: 0.4,
+          minNormalizedSimilarity: 0.7,
+          mode: 'flag_only',
+        },
+      },
+    });
+    const conflictLLM: LLMProvider = {
+      name: 'conflict-mock',
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        action: 'keep_a',
+        conflict_type: 'direct_conflict',
+        reason: 'claims conflict directly but there is no clear time order',
+      })),
+    };
+    const auditVector = createMockVector();
+    (auditVector.search as any).mockResolvedValue([
+      { id: 'conflict-a', distance: 0.1 },
+      { id: 'conflict-b', distance: 0.15 },
+    ]);
+    const auditLifecycle = new LifecycleEngine(conflictLLM, createMockEmbedding(), auditVector, auditConfig);
+
+    insertMemory({
+      id: 'conflict-a',
+      layer: 'core',
+      category: 'fact',
+      content: 'User only works on-site.',
+      agent_id: 'direct-conflict-test',
+      confidence: 0.82,
+      importance: 0.7,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+    insertMemory({
+      id: 'conflict-b',
+      layer: 'core',
+      category: 'fact',
+      content: 'User works fully remote.',
+      agent_id: 'direct-conflict-test',
+      confidence: 0.81,
+      importance: 0.7,
+      decay_score: 0.9,
+    });
+
+    await auditLifecycle.run(false, 'manual', 'direct-conflict-test');
+
+    const updatedA = JSON.parse(getMemoryById('conflict-a')!.metadata!);
+    const updatedB = JSON.parse(getMemoryById('conflict-b')!.metadata!);
+    expect(updatedA.audit_kind).toBe('conflict_needs_review');
+    expect(updatedB.audit_kind).toBe('conflict_needs_review');
+    expect(updatedA.audit_current_candidate_id).toBeUndefined();
+    expect(updatedB.audit_history_candidate_id).toBeUndefined();
+  });
+
+  it('should use configured global lifecycle prompt templates', async () => {
+    const auditConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        prompts: {
+          contradictionAudit: 'CUSTOM_CONTRADICTION_PROMPT {{memory_a_content}} vs {{memory_b_content}}',
+          preferenceExtraction: 'CUSTOM_PREFERENCE_PROMPT {{existing_preferences}} :: {{recent_memories}}',
+        },
+        contradictionAudit: {
+          enabled: true,
+          lookbackDays: 30,
+          candidateTopK: 5,
+          maxCandidates: 10,
+          maxLLMCalls: 5,
+          lowConfidenceThreshold: 0.4,
+          minNormalizedSimilarity: 0.7,
+          mode: 'flag_only',
+        },
+        preferenceExtraction: {
+          enabled: true,
+          lookbackDays: 7,
+          maxNewPreferences: 3,
+          maxLLMCalls: 2,
+          dedupSimilarity: 0.85,
+        },
+      },
+    });
+    const promptCheckingLLM: LLMProvider = {
+      name: 'prompt-check',
+      complete: vi.fn().mockImplementation(async (prompt: string) => {
+        if (prompt.includes('CUSTOM_CONTRADICTION_PROMPT')) {
+          return JSON.stringify({
+            action: 'needs_review',
+            conflict_type: 'direct_conflict',
+            reason: 'custom contradiction template used',
+          });
+        }
+        if (prompt.includes('CUSTOM_PREFERENCE_PROMPT')) {
+          return JSON.stringify([
+            {
+              content: 'User prefers async updates over meetings.',
+              source_memories: ['prompt-pref-src'],
+              confidence: 0.81,
+            },
+          ]);
+        }
+        return 'Merged summary of memories.';
+      }),
+    };
+    const auditVector = createMockVector();
+    (auditVector.search as any).mockResolvedValue([
+      { id: 'prompt-contradiction-new', distance: 0.1 },
+      { id: 'prompt-contradiction-old', distance: 0.15 },
+    ]);
+    const engine = new LifecycleEngine(promptCheckingLLM, createMockEmbedding(), auditVector, auditConfig);
+
+    insertMemory({
+      id: 'prompt-contradiction-old',
+      layer: 'core',
+      category: 'fact',
+      content: 'User works on-site.',
+      agent_id: 'prompt-config-test',
+      confidence: 0.82,
+      importance: 0.7,
+      decay_score: 0.9,
+    });
+    insertMemory({
+      id: 'prompt-contradiction-new',
+      layer: 'core',
+      category: 'fact',
+      content: 'User works remotely.',
+      agent_id: 'prompt-config-test',
+      confidence: 0.83,
+      importance: 0.7,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+    insertMemory({
+      id: 'prompt-pref-src',
+      layer: 'core',
+      category: 'fact',
+      content: 'User wants async updates by default.',
+      agent_id: 'prompt-config-test',
+      confidence: 0.85,
+      importance: 0.72,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+
+    await engine.run(false, 'manual', 'prompt-config-test');
+
+    expect((promptCheckingLLM.complete as any).mock.calls.some(([prompt]: [string]) => prompt.includes('CUSTOM_CONTRADICTION_PROMPT'))).toBe(true);
+    expect((promptCheckingLLM.complete as any).mock.calls.some(([prompt]: [string]) => prompt.includes('CUSTOM_PREFERENCE_PROMPT'))).toBe(true);
+  });
+
+  it('should auto-resolve timeline updates when auto_timeline_supersede mode is enabled', async () => {
+    const auditConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        contradictionAudit: {
+          enabled: true,
+          lookbackDays: 30,
+          candidateTopK: 5,
+          maxCandidates: 10,
+          maxLLMCalls: 5,
+          lowConfidenceThreshold: 0.4,
+          minNormalizedSimilarity: 0.7,
+          autoApplyMinConfidence: 0.75,
+          mode: 'auto_timeline_supersede',
+        },
+      },
+    });
+    const timelineLLM: LLMProvider = {
+      name: 'timeline-auto-mock',
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        action: 'keep_a',
+        reason: 'newer memory describes the current state after a timeline update',
+      })),
+    };
+    const auditVector = createMockVector();
+    (auditVector.search as any).mockResolvedValue([
+      { id: 'timeline-auto-new', distance: 0.1 },
+      { id: 'timeline-auto-old', distance: 0.15 },
+    ]);
+    const auditLifecycle = new LifecycleEngine(timelineLLM, createMockEmbedding(), auditVector, auditConfig);
+
+    insertMemory({
+      id: 'timeline-auto-old',
+      layer: 'core',
+      category: 'fact',
+      content: 'User lives in Tokyo.',
+      agent_id: 'timeline-auto-test',
+      confidence: 0.88,
+      importance: 0.7,
+      decay_score: 0.9,
+    });
+    insertMemory({
+      id: 'timeline-auto-new',
+      layer: 'core',
+      category: 'fact',
+      content: 'User moved to Osaka recently.',
+      agent_id: 'timeline-auto-test',
+      confidence: 0.82,
+      importance: 0.7,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+    const timelineAutoOldAt = new Date(Date.now() - 60_000).toISOString();
+    const timelineAutoNewAt = new Date().toISOString();
+    getDb().prepare('UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?').run(timelineAutoOldAt, timelineAutoOldAt, 'timeline-auto-old');
+    getDb().prepare('UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?').run(timelineAutoNewAt, timelineAutoNewAt, 'timeline-auto-new');
+
+    const report = await auditLifecycle.run(false, 'manual', 'timeline-auto-test');
+    expect(report.contradictionFlagged).toBeGreaterThanOrEqual(1);
+    expect(report.contradictionAutoResolved).toBe(1);
+
+    const updatedOld = getMemoryById('timeline-auto-old')!;
+    const updatedNew = getMemoryById('timeline-auto-new')!;
+    const historyMeta = JSON.parse(updatedOld.metadata!);
+    const currentMeta = JSON.parse(updatedNew.metadata!);
+    expect(updatedOld.superseded_by).toBe('timeline-auto-new');
+    expect(updatedNew.superseded_by).toBeNull();
+    expect(historyMeta.audit_flag).toBeUndefined();
+    expect(currentMeta.audit_flag).toBeUndefined();
+    expect(historyMeta.timeline_resolution.resolution_type).toBe('auto_timeline_keep_current');
+    expect(currentMeta.timeline_resolution.resolution_type).toBe('auto_timeline_keep_current');
+    expect(historyMeta.timeline_resolution.role).toBe('history');
+    expect(currentMeta.timeline_resolution.role).toBe('current');
+
+    const stats = auditLifecycle.getStats('timeline-auto-test');
+    expect(stats.contradictionAudit.timelineResolvedPairs).toBeGreaterThanOrEqual(1);
+
+    const autoLog = getDb().prepare(`
+      SELECT * FROM lifecycle_log
+      WHERE action = 'audit_auto_supersede'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as any;
+    expect(autoLog).toBeTruthy();
   });
 
   it('should expose lifecycle stats snapshot', () => {
@@ -339,6 +608,87 @@ describe('LifecycleEngine', () => {
     const details = JSON.parse(lifecycleLog.details);
     expect(details.source_memory_count).toBeGreaterThanOrEqual(1);
     expect(details.confidence).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it('should reject temporary preference candidates even if the model returns them', async () => {
+    const prefConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        preferenceExtraction: {
+          enabled: true,
+          lookbackDays: 7,
+          maxNewPreferences: 5,
+          maxLLMCalls: 2,
+          dedupSimilarity: 0.85,
+        },
+      },
+    });
+    const prefLLM: LLMProvider = {
+      name: 'pref-filter-mock',
+      complete: vi.fn().mockImplementation(async (prompt: string) => {
+        if (prompt.includes('Extract long-term user preferences')) {
+          return JSON.stringify([
+            {
+              content: 'User is debugging Redis this week.',
+              source_memories: ['pref-temp-src-1'],
+              confidence: 0.88,
+            },
+            {
+              content: 'User prefers async updates over meetings.',
+              source_memories: ['pref-temp-src-2'],
+              confidence: 0.84,
+            },
+          ]);
+        }
+        return 'Merged summary of memories.';
+      }),
+    };
+
+    const prefLifecycle = new LifecycleEngine(prefLLM, createMockEmbedding(), createMockVector(), prefConfig);
+
+    insertMemory({
+      id: 'pref-temp-src-1',
+      layer: 'core',
+      category: 'fact',
+      content: 'User is debugging a Redis issue this week.',
+      agent_id: 'pref-filter-test',
+      confidence: 0.83,
+      importance: 0.72,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+    insertMemory({
+      id: 'pref-temp-src-2',
+      layer: 'core',
+      category: 'fact',
+      content: 'User asked to switch from meetings to async updates by default.',
+      agent_id: 'pref-filter-test',
+      confidence: 0.87,
+      importance: 0.74,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+
+    const report = await prefLifecycle.run(false, 'manual', 'pref-filter-test');
+    expect(report.preferencesExtracted).toBe(1);
+
+    const created = getDb().prepare(`
+      SELECT * FROM memories
+      WHERE agent_id = 'pref-filter-test'
+        AND category = 'preference'
+        AND source = 'lifecycle:preference-extraction'
+        AND superseded_by IS NULL
+      ORDER BY id ASC
+    `).all() as any[];
+    expect(created).toHaveLength(1);
+    expect(created[0].content).toContain('async updates');
   });
 
   it('should expose preference extraction quality checks in lifecycle stats', () => {

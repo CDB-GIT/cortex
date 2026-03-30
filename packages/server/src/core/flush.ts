@@ -176,7 +176,7 @@ export class MemoryFlush {
       this.llm.complete(text, {
         maxTokens: 300,
         temperature: 0.2,
-        systemPrompt: FLUSH_HIGHLIGHTS_SYSTEM_PROMPT,
+        systemPrompt: this.config.flush.prompts?.highlightsSystem || FLUSH_HIGHLIGHTS_SYSTEM_PROMPT,
       }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Flush highlights LLM timeout')), MemoryFlush.FLUSH_LLM_TIMEOUT_MS)
@@ -190,7 +190,7 @@ export class MemoryFlush {
       this.llm.complete(text.slice(0, this.config.sieve.maxConversationChars), {
         maxTokens: this.config.sieve.maxExtractionTokens,
         temperature: 0.1,
-        systemPrompt: FLUSH_CORE_ITEMS_SYSTEM_PROMPT,
+        systemPrompt: this.config.flush.prompts?.coreItemsSystem || FLUSH_CORE_ITEMS_SYSTEM_PROMPT,
       }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Flush structured extraction LLM timeout')), MemoryFlush.FLUSH_LLM_TIMEOUT_MS)

@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { initDatabase, closeDatabase } from '../src/db/index.js';
+import { insertMemory, getMemoryById, listMemories } from '../src/db/queries.js';
 import { loadConfig } from '../src/utils/config.js';
 import { MemorySieve } from '../src/core/sieve.js';
+import { MemoryWriter } from '../src/core/memory-writer.js';
+import { MemoryFlush } from '../src/core/flush.js';
 import type { LLMProvider } from '../src/llm/interface.js';
 import type { EmbeddingProvider } from '../src/embedding/interface.js';
 import type { VectorBackend } from '../src/vector/interface.js';
@@ -99,6 +102,29 @@ describe('MemorySieve', () => {
     expect(mockLLM.complete).toHaveBeenCalled();
   });
 
+  it('should use custom sieve extraction system prompt from config', async () => {
+    const config = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      sieve: {
+        prompts: {
+          extractionSystem: 'CUSTOM_SIEVE_PROMPT',
+        },
+      },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+    });
+    const mockLLM = createMockLLM();
+    const sieve = new MemorySieve(mockLLM, createMockEmbedding(), createMockVector(), config);
+
+    await sieve.ingest({
+      user_message: 'User prefers async updates.',
+      assistant_message: 'Understood.',
+    });
+
+    expect(mockLLM.complete).toHaveBeenCalled();
+    const call = (mockLLM.complete as any).mock.calls[0];
+    expect(call?.[1]?.systemPrompt).toBe('CUSTOM_SIEVE_PROMPT');
+  });
+
   it('should handle LLM failure gracefully', async () => {
     const config = loadConfig({
       storage: { dbPath: ':memory:', walMode: false },
@@ -118,6 +144,80 @@ describe('MemorySieve', () => {
     // Should still work, with empty extractions
     expect(result.structured_extractions).toEqual([]);
     expect(result.extracted).toBeDefined();
+  });
+
+  it('should use custom smart update system prompt from config', async () => {
+    const config = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      sieve: {
+        prompts: {
+          smartUpdateSystem: 'CUSTOM_SMART_UPDATE_PROMPT',
+        },
+      },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+    });
+    const mockLLM: LLMProvider = {
+      name: 'smart-update-mock',
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        action: 'replace',
+        reasoning: 'custom prompt used',
+      })),
+    };
+    const writer = new MemoryWriter(mockLLM, createMockEmbedding(), createMockVector(), config);
+    const existing = insertMemory({
+      id: 'smart-update-existing',
+      layer: 'core',
+      category: 'fact',
+      content: 'User lives in Tokyo.',
+      agent_id: 'smart-update-test',
+      confidence: 0.82,
+      importance: 0.7,
+      decay_score: 0.9,
+    });
+
+    await writer.smartUpdateDecision(existing, 'User moved to Osaka.');
+
+    expect(mockLLM.complete).toHaveBeenCalled();
+    const call = (mockLLM.complete as any).mock.calls[0];
+    expect(call?.[1]?.systemPrompt).toBe('CUSTOM_SMART_UPDATE_PROMPT');
+  });
+
+  it('should use custom flush prompts from config', async () => {
+    const config = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      flush: {
+        prompts: {
+          highlightsSystem: 'CUSTOM_FLUSH_HIGHLIGHTS_PROMPT',
+          coreItemsSystem: 'CUSTOM_FLUSH_CORE_PROMPT',
+        },
+      },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+    });
+    const mockLLM: LLMProvider = {
+      name: 'flush-mock',
+      complete: vi.fn().mockImplementation(async (_prompt: string, opts?: any) => {
+        if (opts?.systemPrompt === 'CUSTOM_FLUSH_CORE_PROMPT') {
+          return JSON.stringify({ memories: [], nothing_extracted: true });
+        }
+        if (opts?.systemPrompt === 'CUSTOM_FLUSH_HIGHLIGHTS_PROMPT') {
+          return 'Session summary';
+        }
+        return '';
+      }),
+    };
+    const flush = new MemoryFlush(mockLLM, createMockEmbedding(), createMockVector(), config);
+
+    await flush.flush({
+      agent_id: 'flush-prompt-test',
+      messages: [
+        { role: 'user', content: 'We discussed shipping the feature next week.' },
+        { role: 'assistant', content: 'I will summarize the session.' },
+      ],
+    });
+
+    const systemPrompts = (mockLLM.complete as any).mock.calls.map((call: any[]) => call?.[1]?.systemPrompt);
+    expect(systemPrompts).toContain('CUSTOM_FLUSH_CORE_PROMPT');
+    expect(systemPrompts).toContain('CUSTOM_FLUSH_HIGHLIGHTS_PROMPT');
   });
 
   it('should skip small talk messages', async () => {
@@ -250,5 +350,74 @@ describe('MemorySieve', () => {
     // Should detect duplicate and increment deduplicated count
     expect(result.deduplicated).toBeGreaterThanOrEqual(0);
     expect(result.extracted).toBeDefined();
+  });
+
+  it('should let correction supersede related todo and decision state memories', async () => {
+    const config = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+    });
+
+    const decision = insertMemory({
+      layer: 'core',
+      category: 'decision',
+      content: '用户已决定将VTuber RSS Digest任务中的模型更新为 cch-gemini/gemini-3-flash-preview，并计划重建new-api',
+      agent_id: 'saki',
+      importance: 0.9,
+    });
+    const todo = insertMemory({
+      layer: 'working',
+      category: 'todo',
+      content: '用户计划重建new-api以解决模型更换问题',
+      agent_id: 'saki',
+      importance: 0.7,
+    });
+    const preference = insertMemory({
+      layer: 'core',
+      category: 'preference',
+      content: '偏好使用 cch-gemini/gemini-3-flash-preview 模型进行任务处理',
+      agent_id: 'saki',
+      importance: 0.8,
+    });
+
+    const correctionLLM: LLMProvider = {
+      name: 'mock-correction',
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        memories: [
+          {
+            content: '纠正：VTuber RSS Digest 任务切换到 cch-gemini/gemini-3-flash-preview 已经完成，new-api 也已经重建完成；“计划重建 new-api”不再是待办状态。',
+            category: 'correction',
+            importance: 0.95,
+            source: 'user_stated',
+            reasoning: '用户明确说明旧计划状态已完成，应覆盖旧状态记忆',
+          },
+        ],
+        nothing_extracted: false,
+      })),
+    };
+
+    const mockVector = createMockVector();
+    mockVector.search = vi.fn().mockResolvedValue([
+      { id: decision.id, distance: 0.18 },
+      { id: todo.id, distance: 0.21 },
+      { id: preference.id, distance: 0.24 },
+    ] as any);
+
+    const sieve = new MemorySieve(correctionLLM, createMockEmbedding(), mockVector, config);
+    const result = await sieve.ingest({
+      user_message: '这个早就已经修改完了，而且我已经重建完了',
+      assistant_message: '收到，我会更新记忆状态',
+      agent_id: 'saki',
+    });
+
+    const correctionMemory = result.extracted.find(m => m.category === 'correction');
+    expect(correctionMemory).toBeDefined();
+
+    expect(getMemoryById(decision.id)?.superseded_by).toBe(correctionMemory!.id);
+    expect(getMemoryById(todo.id)?.superseded_by).toBe(correctionMemory!.id);
+    expect(getMemoryById(preference.id)?.superseded_by).toBeFalsy();
+
+    const activeTodos = listMemories({ agent_id: 'saki' }).items.filter(m => m.category === 'todo' && !m.superseded_by);
+    expect(activeTodos.some(m => m.id === todo.id)).toBe(false);
   });
 });

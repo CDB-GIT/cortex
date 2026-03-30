@@ -144,6 +144,7 @@ export default function LifecycleMonitor() {
       'conflict_review_resolved': '✓ 冲突人工确认',
       'conflict_review_resolution_rolled_back': '↩ 冲突回滚',
       'contradiction_audit_flagged': t('lifecycle.auditLabel') || '⚑ 审计打标',
+      'audit_auto_supersede': '✓ 自动采用较新状态',
     };
     return map[action] || action;
   };
@@ -165,6 +166,7 @@ export default function LifecycleMonitor() {
       'conflict_review_resolved': 'rgba(244,114,182,0.75)',
       'conflict_review_resolution_rolled_back': 'rgba(251,146,60,0.75)',
       'contradiction_audit_flagged': 'rgba(244,114,182,0.75)',
+      'audit_auto_supersede': 'rgba(16,185,129,0.75)',
     };
     return map[action] || 'rgba(99,102,241,0.3)';
   };
@@ -190,6 +192,7 @@ export default function LifecycleMonitor() {
         if (d.promoted) parts.push(`升级 ${d.promoted}`);
         if (d.preferencesExtracted) parts.push(`偏好 ${d.preferencesExtracted}`);
         if (d.preferenceDuplicatesFlagged) parts.push(`重复偏好 ${d.preferenceDuplicatesFlagged}`);
+        if (d.contradictionAutoResolved) parts.push(`自动收口 ${d.contradictionAutoResolved}`);
         if (d.merged) parts.push(`合并 ${d.merged}`);
         if (d.archived) parts.push(`归档 ${d.archived}`);
         if (d.expiredWorking) parts.push(`清理 ${d.expiredWorking}`);
@@ -232,6 +235,13 @@ export default function LifecycleMonitor() {
         const parts: string[] = [];
         if (d.current_id) parts.push(`当前 ${d.current_id}`);
         if (d.history_id) parts.push(`历史 ${d.history_id}`);
+        return parts.join(' · ') || '\u2014';
+      }
+      if (action === 'audit_auto_supersede') {
+        const parts: string[] = [];
+        if (d.current_id) parts.push(`当前 ${d.current_id}`);
+        if (d.history_id) parts.push(`历史 ${d.history_id}`);
+        if (d.threshold != null) parts.push(`阈值 ${Number(d.threshold).toFixed(2)}`);
         return parts.join(' · ') || '\u2014';
       }
       if (action === 'conflict_review_resolved') {
@@ -317,6 +327,17 @@ export default function LifecycleMonitor() {
               <div style={{ fontSize: 12, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>{t('lifecycle.decayLambda')}</div>
               <div style={{ fontSize: 16, fontWeight: 600 }}>{config.lifecycle?.decayLambda}</div>
               <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>{t('lifecycle.decayDesc')}</div>
+            </div>
+            <div style={{ padding: 12, background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div style={{ fontSize: 12, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>矛盾审计模式</div>
+              <div style={{ fontSize: 16, fontWeight: 600 }}>
+                {config.lifecycle?.contradictionAudit?.mode === 'auto_timeline_supersede' ? '自动采用较新状态' : '只打标'}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>
+                {config.lifecycle?.contradictionAudit?.autoApplyMinConfidence != null
+                  ? `自动处理阈值 ${Number(config.lifecycle.contradictionAudit.autoApplyMinConfidence).toFixed(2)}`
+                  : '默认只打标'}
+              </div>
             </div>
           </div>
         </div>
@@ -743,6 +764,7 @@ export default function LifecycleMonitor() {
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.archived')}</div><div className="value">{runResult.archived}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.compressed')}</div><div className="value">{runResult.compressedToCore}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.auditFlagged') || '审计打标'}</div><div className="value">{runResult.contradictionFlagged ?? 0}</div></div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">自动收口</div><div className="value">{runResult.contradictionAutoResolved ?? 0}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.llmCalls') || 'LLM 调用'}</div><div className="value">{runResult.observability?.llm?.totalCalls ?? 0}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.duration')}</div><div className="value">{runResult.durationMs}ms</div></div>
           </div>

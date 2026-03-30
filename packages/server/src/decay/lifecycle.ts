@@ -10,7 +10,11 @@ import type { LLMProvider } from '../llm/interface.js';
 import type { EmbeddingProvider } from '../embedding/interface.js';
 import type { VectorBackend } from '../vector/interface.js';
 import type { CortexConfig } from '../utils/config.js';
-import { PROFILE_SYNTHESIS_PROMPT } from '../core/prompts.js';
+import {
+  PROFILE_SYNTHESIS_PROMPT,
+  buildContradictionAuditPrompt,
+  buildPreferenceExtractionPrompt,
+} from '../core/prompts.js';
 
 const log = createLogger('lifecycle');
 
@@ -61,6 +65,7 @@ export interface LifecycleReport {
   relationDecayUpdated?: number;
   profilesSynthesized?: number;
   contradictionFlagged?: number;
+  contradictionAutoResolved?: number;
   accessLogsCleaned?: number;
   indexRebuilt: boolean;
   errors: string[];
@@ -208,6 +213,7 @@ interface CompressionResult {
 
 interface ContradictionAuditResult {
   flagged: number;
+  autoResolved: number;
   candidates: number;
   llmCalls: number;
   similarPairs: number;
@@ -227,6 +233,24 @@ interface PreferenceDuplicateAuditResult {
 interface ProfileSynthesisResult {
   agentsProcessed: number;
   llmCalls: number;
+}
+
+interface TimelineResolutionMeta {
+  resolution_id: string;
+  resolution_type: 'auto_timeline_keep_current';
+  role: 'current' | 'history';
+  current_id: string;
+  history_id: string;
+  resolved_at: string;
+  resolved_by: 'lifecycle';
+}
+
+type ContradictionConflictType = 'timeline_update' | 'direct_conflict' | 'both_valid' | 'needs_review';
+
+interface ContradictionDecision {
+  action: 'keep_a' | 'keep_b' | 'both_valid' | 'needs_review';
+  conflictType: ContradictionConflictType;
+  reason: string;
 }
 
 interface LifecycleStatsMemoryRow {
@@ -380,7 +404,9 @@ export class LifecycleEngine {
         const phaseStart = Date.now();
         const audit = await this.runContradictionAudit(report.affectedMemories, agentId, llmTracker);
         report.contradictionFlagged = audit.flagged;
+        report.contradictionAutoResolved = audit.autoResolved;
         recordPhase('contradictionAudit', phaseStart, audit.flagged, {
+          autoResolved: audit.autoResolved,
           candidates: audit.candidates,
           llmCalls: audit.llmCalls,
           similarPairs: audit.similarPairs,
@@ -811,6 +837,23 @@ export class LifecycleEngine {
     return dot / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 
+  private stripConflictAuditMetadata(meta: Record<string, any>): Record<string, any> {
+    const next = { ...meta };
+    delete next.audit_flag;
+    delete next.audit_reason;
+    delete next.audit_kind;
+    delete next.audit_conflict_with;
+    delete next.audit_decision;
+    delete next.audit_decision_reason;
+    delete next.audit_at;
+    delete next.audit_version;
+    delete next.audit_current_candidate_id;
+    delete next.audit_history_candidate_id;
+    delete next.audit_timeline_role;
+    delete next.timeline_resolution;
+    return next;
+  }
+
   private mergeAuditMetadata(
     existing: Memory,
     counterpartId: string,
@@ -868,36 +911,53 @@ export class LifecycleEngine {
     });
   }
 
+  private buildTimelineResolvedMetadata(
+    memory: Memory,
+    resolution: TimelineResolutionMeta,
+  ): string {
+    return JSON.stringify({
+      ...this.stripConflictAuditMetadata(this.parseMetadata(memory.metadata)),
+      timeline_resolution: resolution,
+    });
+  }
+
+  private inferConflictType(
+    action: 'keep_a' | 'keep_b' | 'both_valid' | 'needs_review',
+    reason: string,
+  ): ContradictionConflictType {
+    if (action === 'both_valid') return 'both_valid';
+    if (action === 'needs_review') return 'needs_review';
+    const normalized = reason.toLowerCase();
+    if (
+      /timeline|newer|older|updated|update|supersede|superseded|moved|changed|current state|latest state|different times/.test(normalized)
+    ) {
+      return 'timeline_update';
+    }
+    return 'direct_conflict';
+  }
+
+  private isDurablePreferenceCandidate(content: string): boolean {
+    const normalized = content.normalize('NFKC').trim().toLowerCase();
+    if (!normalized) return false;
+    const shortLivedPatterns = [
+      /\b(today|tonight|tomorrow|this week|this month|this sprint|this task|this ticket|this issue|this bug|this migration|for now|recently|currently|current task|temporary|temp)\b/i,
+      /(今天|今晚|明天|这周|本周|这个月|这次|当前任务|当前问题|这个任务|这个工单|这个问题|最近|暂时|先这样)/,
+    ];
+    return !shortLivedPatterns.some((pattern) => pattern.test(content));
+  }
+
   private async judgeContradiction(
     memoryA: Memory,
     memoryB: Memory,
     llmTracker: LifecycleLLMTracker,
-  ): Promise<{ action: 'keep_a' | 'keep_b' | 'both_valid' | 'needs_review'; reason: string }> {
+  ): Promise<ContradictionDecision> {
     llmTracker.totalCalls++;
     const raw = await this.llm.complete(
-      `Possible contradiction audit. Compare the two memories and decide whether they conflict.
-
-Memory A:
-- content: ${memoryA.content}
-- category: ${memoryA.category}
-- created_at: ${memoryA.created_at}
-- access_count: ${memoryA.access_count}
-- confidence: ${memoryA.confidence}
-
-Memory B:
-- content: ${memoryB.content}
-- category: ${memoryB.category}
-- created_at: ${memoryB.created_at}
-- access_count: ${memoryB.access_count}
-- confidence: ${memoryB.confidence}
-
-Rules:
-- If both can be true at different times, return both_valid.
-- If one clearly supersedes the other, choose keep_a or keep_b.
-- If unsure, return needs_review.
-
-Return JSON only:
-{"action":"keep_a|keep_b|both_valid|needs_review","reason":"short explanation"}`,
+      buildContradictionAuditPrompt({
+        memoryA,
+        memoryB,
+        template: this.config.lifecycle.prompts?.contradictionAudit,
+      }),
       { maxTokens: 180, temperature: 0.1 },
     );
 
@@ -905,16 +965,25 @@ Return JSON only:
       const parsed = JSON.parse(raw);
       const action = parsed?.action;
       if (action === 'keep_a' || action === 'keep_b' || action === 'both_valid' || action === 'needs_review') {
+        const reason = typeof parsed?.reason === 'string' ? parsed.reason : '';
+        const conflictType = parsed?.conflict_type;
+        const normalizedConflictType = conflictType === 'timeline_update'
+          || conflictType === 'direct_conflict'
+          || conflictType === 'both_valid'
+          || conflictType === 'needs_review'
+          ? conflictType
+          : this.inferConflictType(action, reason);
         return {
           action,
-          reason: typeof parsed?.reason === 'string' ? parsed.reason : '',
+          conflictType: normalizedConflictType,
+          reason,
         };
       }
     } catch {
       // fall through
     }
 
-    return { action: 'needs_review', reason: 'unparseable_llm_response' };
+    return { action: 'needs_review', conflictType: 'needs_review', reason: 'unparseable_llm_response' };
   }
 
   private async runContradictionAudit(
@@ -960,57 +1029,73 @@ Return JSON only:
     ) as Memory[];
 
     if (candidates.length === 0) {
-      return { flagged: 0, candidates: 0, llmCalls: 0, similarPairs: 0 };
+      return { flagged: 0, autoResolved: 0, candidates: 0, llmCalls: 0, similarPairs: 0 };
     }
 
-    const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
     const auditedPairs = new Set<string>();
     let flagged = 0;
+    let autoResolved = 0;
     let llmCalls = 0;
     let similarPairs = 0;
 
     for (const candidate of candidates) {
       try {
-        const embedding = await this.embeddingProvider.embed(candidate.content);
+        const activeCandidate = db.prepare(`
+          SELECT *
+          FROM memories
+          WHERE id = ?
+            AND layer = 'core'
+            AND superseded_by IS NULL
+            AND is_pinned = 0
+        `).get(candidate.id) as Memory | undefined;
+        if (!activeCandidate) continue;
+
+        const embedding = await this.embeddingProvider.embed(activeCandidate.content);
         if (embedding.length === 0) continue;
 
-        const hits = await this.vectorBackend.search(embedding, auditConfig.candidateTopK + 1, { agent_id: candidate.agent_id });
+        const hits = await this.vectorBackend.search(embedding, auditConfig.candidateTopK + 1, { agent_id: activeCandidate.agent_id });
         for (const hit of hits) {
-          if (hit.id === candidate.id) continue;
+          if (hit.id === activeCandidate.id) continue;
 
-          const counterpart = candidateById.get(hit.id)
-            || db.prepare("SELECT * FROM memories WHERE id = ? AND layer = 'core' AND superseded_by IS NULL AND is_pinned = 0").get(hit.id) as Memory | undefined;
+          const counterpart = db.prepare(`
+            SELECT *
+            FROM memories
+            WHERE id = ?
+              AND layer = 'core'
+              AND superseded_by IS NULL
+              AND is_pinned = 0
+          `).get(hit.id) as Memory | undefined;
           if (!counterpart) continue;
-          if (counterpart.agent_id !== candidate.agent_id) continue;
-          if (counterpart.category !== candidate.category) continue;
+          if (counterpart.agent_id !== activeCandidate.agent_id) continue;
+          if (counterpart.category !== activeCandidate.category) continue;
 
           const similarity = this.normalizeSimilarityFromDistance(hit.distance);
           if (similarity < auditConfig.minNormalizedSimilarity) continue;
 
-          const pairKey = [candidate.id, counterpart.id].sort().join('::');
+          const pairKey = [activeCandidate.id, counterpart.id].sort().join('::');
           if (auditedPairs.has(pairKey)) continue;
           auditedPairs.add(pairKey);
           similarPairs++;
 
           if (llmCalls >= auditConfig.maxLLMCalls) {
-            return { flagged, candidates: candidates.length, llmCalls, similarPairs };
+            return { flagged, autoResolved, candidates: candidates.length, llmCalls, similarPairs };
           }
 
-          const decision = await this.judgeContradiction(candidate, counterpart, llmTracker);
+          const decision = await this.judgeContradiction(activeCandidate, counterpart, llmTracker);
           llmCalls++;
-          if (decision.action === 'both_valid') continue;
+          if (decision.action === 'both_valid' || decision.conflictType === 'both_valid') continue;
 
-          const timeline = decision.action === 'keep_a'
-            ? { currentId: candidate.id, historyId: counterpart.id }
-            : decision.action === 'keep_b'
-              ? { currentId: counterpart.id, historyId: candidate.id }
+          const timeline = decision.conflictType === 'timeline_update' && decision.action === 'keep_a'
+            ? { currentId: activeCandidate.id, historyId: counterpart.id }
+            : decision.conflictType === 'timeline_update' && decision.action === 'keep_b'
+              ? { currentId: counterpart.id, historyId: activeCandidate.id }
               : undefined;
-          const candidateMeta = this.mergeAuditMetadata(candidate, counterpart.id, decision.action, decision.reason, timeline);
-          const counterpartMeta = this.mergeAuditMetadata(counterpart, candidate.id, decision.action, decision.reason, timeline);
-          updateMemory(candidate.id, { metadata: candidateMeta });
+          const candidateMeta = this.mergeAuditMetadata(activeCandidate, counterpart.id, decision.action, decision.reason, timeline);
+          const counterpartMeta = this.mergeAuditMetadata(counterpart, activeCandidate.id, decision.action, decision.reason, timeline);
+          updateMemory(activeCandidate.id, { metadata: candidateMeta });
           updateMemory(counterpart.id, { metadata: counterpartMeta });
-          insertLifecycleLog('contradiction_audit_flagged', [candidate.id, counterpart.id], {
-            agent_id: agentId || candidate.agent_id,
+          insertLifecycleLog('contradiction_audit_flagged', [activeCandidate.id, counterpart.id], {
+            agent_id: agentId || activeCandidate.agent_id,
             decision: decision.action,
             reason: decision.reason,
             audit_kind: timeline ? 'timeline_update_candidate' : 'conflict_needs_review',
@@ -1021,12 +1106,75 @@ Return JSON only:
           });
           flagged++;
 
+          const currentConfidence = timeline
+            ? (timeline.currentId === activeCandidate.id ? activeCandidate.confidence : counterpart.confidence)
+            : 0;
+          if (
+            timeline
+            && auditConfig.mode === 'auto_timeline_supersede'
+            && currentConfidence >= auditConfig.autoApplyMinConfidence
+          ) {
+            const current = db.prepare(`
+              SELECT *
+              FROM memories
+              WHERE id = ?
+                AND layer = 'core'
+                AND superseded_by IS NULL
+            `).get(timeline.currentId) as Memory | undefined;
+            const history = db.prepare(`
+              SELECT *
+              FROM memories
+              WHERE id = ?
+                AND layer = 'core'
+                AND superseded_by IS NULL
+            `).get(timeline.historyId) as Memory | undefined;
+            if (current && history) {
+              const resolvedAt = new Date().toISOString();
+              const resolutionId = generateId();
+              const resolutionBase = {
+                resolution_id: resolutionId,
+                resolution_type: 'auto_timeline_keep_current' as const,
+                current_id: current.id,
+                history_id: history.id,
+                resolved_at: resolvedAt,
+                resolved_by: 'lifecycle' as const,
+              };
+              updateMemory(current.id, {
+                superseded_by: null,
+                metadata: this.buildTimelineResolvedMetadata(current, {
+                  ...resolutionBase,
+                  role: 'current',
+                }),
+              });
+              updateMemory(history.id, {
+                superseded_by: current.id,
+                metadata: this.buildTimelineResolvedMetadata(history, {
+                  ...resolutionBase,
+                  role: 'history',
+                }),
+              });
+              insertLifecycleLog('audit_auto_supersede', [current.id, history.id], {
+                resolution_id: resolutionId,
+                current_id: current.id,
+                history_id: history.id,
+                agent_id: agentId || current.agent_id,
+                reason: decision.reason,
+                similarity: Number(similarity.toFixed(3)),
+                confidence_current: current.confidence,
+                confidence_history: history.confidence,
+                threshold: auditConfig.autoApplyMinConfidence,
+                mode: auditConfig.mode,
+              });
+              autoResolved++;
+            }
+          }
+
           if (affected) {
             affected.push({
-              id: candidate.id,
-              content: candidate.content,
-              category: candidate.category,
-              importance: candidate.importance,
+              id: activeCandidate.id,
+              content: activeCandidate.content,
+              category: activeCandidate.category,
+              importance: activeCandidate.importance,
               action: 'audit',
               score: similarity,
               reason: timeline
@@ -1040,7 +1188,7 @@ Return JSON only:
       }
     }
 
-    return { flagged, candidates: candidates.length, llmCalls, similarPairs };
+    return { flagged, autoResolved, candidates: candidates.length, llmCalls, similarPairs };
   }
 
   private parsePreferenceExtractionResponse(raw: string): Array<{ content: string; source_memories?: string[]; confidence?: number }> {
@@ -1391,24 +1539,17 @@ Return JSON only:
       llmTracker.totalCalls++;
       llmTracker.preferenceExtractionCalls++;
       const raw = await this.llm.complete(
-        `Extract long-term user preferences from the recent memories below.
-
-Only extract durable preferences, habits, likes/dislikes, or working style.
-Do not extract one-off events, timestamps, or temporary context.
-Avoid duplicates with existing preferences.
-
-Existing preferences:
-${existingText || '- none'}
-
-Recent memories:
-${memoriesText}
-
-Return JSON array only:
-[{"content":"...", "source_memories":["memory_id"], "confidence":0.8}]`,
+        buildPreferenceExtractionPrompt({
+          existingPreferences: existingText || '- none',
+          recentMemories: memoriesText,
+          template: this.config.lifecycle.prompts?.preferenceExtraction,
+        }),
         { maxTokens: 280, temperature: 0.2 },
       );
 
-      const candidates = this.parsePreferenceExtractionResponse(raw);
+      const candidates = this.parsePreferenceExtractionResponse(raw).filter((candidate) =>
+        this.isDurablePreferenceCandidate(candidate.content),
+      );
       if (candidates.length === 0) {
         agentsProcessed++;
         continue;

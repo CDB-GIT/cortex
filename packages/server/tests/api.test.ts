@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { loadConfig } from '../src/utils/config.js';
-import { initDatabase, closeDatabase, insertMemory } from '../src/db/index.js';
+import { initDatabase, closeDatabase, insertMemory, getDb } from '../src/db/index.js';
 import { CortexApp } from '../src/app.js';
 import { registerAllRoutes } from '../src/api/router.js';
 
@@ -260,6 +260,67 @@ describe('API Integration', () => {
       const rollbackLogRes = await app.inject({ method: 'GET', url: '/api/v1/lifecycle/log?limit=20' });
       const rollbackLogBody = JSON.parse(rollbackLogRes.payload);
       expect(rollbackLogBody.items.some((item: any) => item.action === 'timeline_update_resolution_rolled_back')).toBe(true);
+    });
+
+    it('should roll back an auto-resolved timeline update pair', async () => {
+      insertMemory({
+        id: 'api-timeline-auto-old',
+        layer: 'core',
+        category: 'fact',
+        content: 'User lives in Tokyo.',
+        agent_id: 'api-timeline-auto',
+        confidence: 0.88,
+        importance: 0.7,
+        superseded_by: 'api-timeline-auto-new' as any,
+        metadata: JSON.stringify({
+          timeline_resolution: {
+            resolution_id: 'auto-resolution-1',
+            resolution_type: 'auto_timeline_keep_current',
+            role: 'history',
+            current_id: 'api-timeline-auto-new',
+            history_id: 'api-timeline-auto-old',
+            resolved_at: new Date().toISOString(),
+            resolved_by: 'lifecycle',
+          },
+        }),
+      });
+      insertMemory({
+        id: 'api-timeline-auto-new',
+        layer: 'core',
+        category: 'fact',
+        content: 'User moved to Osaka recently.',
+        agent_id: 'api-timeline-auto',
+        confidence: 0.84,
+        importance: 0.72,
+        metadata: JSON.stringify({
+          timeline_resolution: {
+            resolution_id: 'auto-resolution-1',
+            resolution_type: 'auto_timeline_keep_current',
+            role: 'current',
+            current_id: 'api-timeline-auto-new',
+            history_id: 'api-timeline-auto-old',
+            resolved_at: new Date().toISOString(),
+            resolved_by: 'lifecycle',
+          },
+        }),
+      });
+      getDb().prepare("UPDATE memories SET superseded_by = ? WHERE id = ?").run('api-timeline-auto-new', 'api-timeline-auto-old');
+
+      const rollbackRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/memories/api-timeline-auto-new/timeline-update/rollback',
+        payload: {
+          resolution_id: 'auto-resolution-1',
+        },
+      });
+      expect(rollbackRes.statusCode).toBe(200);
+
+      const rollbackCurrent = JSON.parse((await app.inject({ method: 'GET', url: '/api/v1/memories/api-timeline-auto-new' })).payload);
+      const rollbackHistory = JSON.parse((await app.inject({ method: 'GET', url: '/api/v1/memories/api-timeline-auto-old' })).payload);
+      expect(rollbackCurrent.superseded_by).toBeNull();
+      expect(rollbackHistory.superseded_by).toBeNull();
+      expect(JSON.parse(rollbackCurrent.metadata).audit_kind).toBe('timeline_update_candidate');
+      expect(JSON.parse(rollbackHistory.metadata).audit_kind).toBe('timeline_update_candidate');
     });
 
     it('should resolve and roll back a conflict review pair manually', async () => {

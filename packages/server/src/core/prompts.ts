@@ -342,3 +342,118 @@ Use this section structure (translate section names to match the memory language
 - Agent growth: self-improvement notes, user habit observations, interaction dynamics, persona style
 
 Only include sections that have data. Be specific and factual. Do not infer or speculate.`;
+
+function renderPromptTemplate(template: string, values: Record<string, string | number>): string {
+  let output = template;
+  for (const [key, value] of Object.entries(values)) {
+    output = output.replaceAll(`{{${key}}}`, String(value));
+  }
+  return output;
+}
+
+export const DEFAULT_CONTRADICTION_AUDIT_PROMPT_TEMPLATE = `Possible contradiction audit. Compare the two memories and decide whether they conflict.
+
+Memory A:
+- content: {{memory_a_content}}
+- category: {{memory_a_category}}
+- created_at: {{memory_a_created_at}}
+- access_count: {{memory_a_access_count}}
+- confidence: {{memory_a_confidence}}
+
+Memory B:
+- content: {{memory_b_content}}
+- category: {{memory_b_category}}
+- created_at: {{memory_b_created_at}}
+- access_count: {{memory_b_access_count}}
+- confidence: {{memory_b_confidence}}
+
+Decision rules:
+- Return both_valid when the memories can both be true, are complementary, or are not actually contradictory.
+- Use conflict_type = timeline_update only when one memory is clearly a newer state update and the older memory should remain as history.
+- Use keep_a or keep_b ONLY for timeline_update cases.
+- If the memories disagree but there is no clear time order, no explicit update signal, or the safer interpretation is manual review, return needs_review with conflict_type = direct_conflict.
+- If unsure, return needs_review. Do not guess.
+
+Examples:
+- "lives in Tokyo" -> "moved to Osaka" => timeline_update + keep newer memory
+- "works only on-site" vs "works fully remote" without time order => direct_conflict + needs_review
+- "likes Python" + "also uses Rust" => both_valid
+
+Return JSON only:
+{"action":"keep_a|keep_b|both_valid|needs_review","conflict_type":"timeline_update|direct_conflict|both_valid|needs_review","reason":"short explanation"}`;
+
+export function buildContradictionAuditPrompt(args: {
+  memoryA: {
+    content: string;
+    category: string;
+    created_at: string;
+    access_count: number;
+    confidence: number;
+  };
+  memoryB: {
+    content: string;
+    category: string;
+    created_at: string;
+    access_count: number;
+    confidence: number;
+  };
+  template?: string;
+}): string {
+  const { memoryA, memoryB, template } = args;
+  return renderPromptTemplate(template || DEFAULT_CONTRADICTION_AUDIT_PROMPT_TEMPLATE, {
+    memory_a_content: memoryA.content,
+    memory_a_category: memoryA.category,
+    memory_a_created_at: memoryA.created_at,
+    memory_a_access_count: memoryA.access_count,
+    memory_a_confidence: memoryA.confidence,
+    memory_b_content: memoryB.content,
+    memory_b_category: memoryB.category,
+    memory_b_created_at: memoryB.created_at,
+    memory_b_access_count: memoryB.access_count,
+    memory_b_confidence: memoryB.confidence,
+  });
+}
+
+export const DEFAULT_PREFERENCE_EXTRACTION_PROMPT_TEMPLATE = `Extract long-term user preferences from the recent memories below.
+
+Only extract durable preferences, habits, likes/dislikes, routines, or working style.
+
+Hard exclusions:
+- Do NOT extract one-off events, current tasks, temporary plans, recent incident context, or session-specific work.
+- Do NOT convert a status update into a preference.
+- Do NOT extract facts like location changes, project states, or decisions unless they clearly imply a stable long-term preference.
+- Reject wording that depends on short-lived time markers such as "today", "this week", "for this task", "recently", "for now", "当前", "这次", "最近".
+
+Good examples:
+- "prefers async updates over meetings"
+- "likes low-interruption work blocks"
+- "usually starts coding early in the morning"
+
+Bad examples:
+- "is debugging a Redis issue this week"
+- "recently moved to Osaka"
+- "will use Prisma for this migration"
+
+Avoid duplicates with existing preferences.
+Keep each output short and standalone.
+
+Existing preferences:
+{{existing_preferences}}
+
+Recent memories:
+{{recent_memories}}
+
+Return JSON array only:
+[{"content":"...", "source_memories":["memory_id"], "confidence":0.8}]`;
+
+export function buildPreferenceExtractionPrompt(args: {
+  existingPreferences: string;
+  recentMemories: string;
+  template?: string;
+}): string {
+  const { existingPreferences, recentMemories, template } = args;
+  return renderPromptTemplate(template || DEFAULT_PREFERENCE_EXTRACTION_PROMPT_TEMPLATE, {
+    existing_preferences: existingPreferences || '- none',
+    recent_memories: recentMemories,
+  });
+}
