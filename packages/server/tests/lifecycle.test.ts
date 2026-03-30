@@ -9,7 +9,12 @@ import type { VectorBackend } from '../src/vector/interface.js';
 function createMockLLM(): LLMProvider {
   return {
     name: 'mock',
-    complete: vi.fn().mockResolvedValue('Merged summary of memories.'),
+    complete: vi.fn().mockImplementation(async (prompt: string) => {
+      if (prompt.includes('Possible contradiction audit')) {
+        return JSON.stringify({ action: 'keep_b', reason: 'newer memory supersedes older memory' });
+      }
+      return 'Merged summary of memories.';
+    }),
   };
 }
 
@@ -117,6 +122,70 @@ describe('LifecycleEngine', () => {
     expect(report.observability.llm).toBeDefined();
     expect(Array.isArray(report.observability.phases)).toBe(true);
     expect(report.observability.phases.some((p) => p.key === 'updateDecayScores')).toBe(true);
+  });
+
+  it('should flag possible contradictions without superseding memories', async () => {
+    const auditConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        contradictionAudit: {
+          enabled: true,
+          lookbackDays: 30,
+          candidateTopK: 5,
+          maxCandidates: 10,
+          maxLLMCalls: 5,
+          lowConfidenceThreshold: 0.4,
+          minNormalizedSimilarity: 0.7,
+          mode: 'flag_only',
+        },
+      },
+    });
+    const auditVector = createMockVector();
+    (auditVector.search as any).mockResolvedValue([
+      { id: 'mem-new', distance: 0.1 },
+      { id: 'mem-old', distance: 0.15 },
+    ]);
+    const auditLifecycle = new LifecycleEngine(createMockLLM(), createMockEmbedding(), auditVector, auditConfig);
+
+    const oldMem = insertMemory({
+      id: 'mem-old',
+      layer: 'core',
+      category: 'fact',
+      content: 'User lives in Tokyo.',
+      agent_id: 'audit-test',
+      confidence: 0.9,
+      importance: 0.7,
+      decay_score: 0.9,
+    });
+    const newMem = insertMemory({
+      id: 'mem-new',
+      layer: 'core',
+      category: 'fact',
+      content: 'User recently moved to Osaka.',
+      agent_id: 'audit-test',
+      confidence: 0.3,
+      importance: 0.7,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+
+    const report = await auditLifecycle.run(false, 'manual', 'audit-test');
+    expect(report.contradictionFlagged).toBeGreaterThanOrEqual(1);
+    expect(report.observability.phases.some((p) => p.key === 'contradictionAudit')).toBe(true);
+
+    const updatedOld = getMemoryById(oldMem.id)!;
+    const updatedNew = getMemoryById(newMem.id)!;
+    expect(updatedOld.superseded_by).toBeNull();
+    expect(updatedNew.superseded_by).toBeNull();
+    expect(updatedOld.metadata).toContain('possible_conflict');
+    expect(updatedNew.metadata).toContain('possible_conflict');
   });
 
   it('should expose lifecycle stats snapshot', () => {

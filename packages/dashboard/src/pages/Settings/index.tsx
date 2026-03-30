@@ -144,6 +144,11 @@ export default function Settings() {
           promotionThreshold: config.lifecycle?.promotionThreshold ?? 0.6,
           archiveThreshold: config.lifecycle?.archiveThreshold ?? 0.2,
           decayLambda: config.lifecycle?.decayLambda ?? 0.03,
+          contradictionAudit: {
+            enabled: config.lifecycle?.contradictionAudit?.enabled ?? false,
+            maxLLMCalls: config.lifecycle?.contradictionAudit?.maxLLMCalls ?? 20,
+            lowConfidenceThreshold: config.lifecycle?.contradictionAudit?.lowConfidenceThreshold ?? 0.4,
+          },
         };
       },
       layers: () => ({
@@ -263,9 +268,13 @@ export default function Settings() {
       const pt = Number(draft.promotionThreshold);
       const at = Number(draft.archiveThreshold);
       const dl = Number(draft.decayLambda);
+      const maxLlmCalls = Number(draft.contradictionAudit?.maxLLMCalls);
+      const lowConfidenceThreshold = Number(draft.contradictionAudit?.lowConfidenceThreshold);
       if (isNaN(pt) || pt < 0 || pt > 1) errors.push(t('settings.validationThresholdRange'));
       if (isNaN(at) || at < 0 || at > 1) errors.push(t('settings.validationThresholdRange'));
       if (isNaN(dl) || dl <= 0 || dl > 0.5) errors.push(t('settings.validationDecayRange'));
+      if (isNaN(maxLlmCalls) || maxLlmCalls < 1 || maxLlmCalls > 100) errors.push(t('settings.validationPositiveNumber'));
+      if (isNaN(lowConfidenceThreshold) || lowConfidenceThreshold < 0.05 || lowConfidenceThreshold > 0.9) errors.push(t('settings.validationThresholdRange'));
       if (draft.customSchedule && draft.schedule && !/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(draft.schedule)) {
         errors.push(t('settings.validationCronFormat'));
       }
@@ -390,6 +399,12 @@ export default function Settings() {
           promotionThreshold: Number(draft.promotionThreshold),
           archiveThreshold: Number(draft.archiveThreshold),
           decayLambda: Number(draft.decayLambda),
+          contradictionAudit: {
+            ...(config.lifecycle?.contradictionAudit ?? {}),
+            enabled: draft.contradictionAudit?.enabled ?? false,
+            maxLLMCalls: Number(draft.contradictionAudit?.maxLLMCalls ?? 20),
+            lowConfidenceThreshold: Number(draft.contradictionAudit?.lowConfidenceThreshold ?? 0.4),
+          },
         };
       } else if (section === 'layers') {
         payload.layers = {
@@ -1050,6 +1065,8 @@ export default function Settings() {
         sectionHeader={sectionHeader}
         displayRow={displayRow}
         renderSchedule={renderSchedule}
+        renderToggleField={renderToggleField}
+        renderNumberField={renderNumberField}
         renderSlider={renderSlider}
         humanizeCron={humanizeCron}
         t={t}

@@ -135,6 +135,7 @@ export default function LifecycleMonitor() {
       'archive': t('lifecycle.archiveLabel') || '📦 归档',
       'merge': t('lifecycle.mergeLabel') || '🔗 合并',
       'compress': t('lifecycle.compressLabel') || '📐 压缩',
+      'contradiction_audit_flagged': t('lifecycle.auditLabel') || '⚑ 审计打标',
     };
     return map[action] || action;
   };
@@ -147,6 +148,7 @@ export default function LifecycleMonitor() {
       'archive': 'rgba(251,191,36,0.7)',
       'merge': 'rgba(56,189,248,0.7)',
       'compress': 'rgba(168,85,247,0.7)',
+      'contradiction_audit_flagged': 'rgba(244,114,182,0.75)',
     };
     return map[action] || 'rgba(99,102,241,0.3)';
   };
@@ -184,6 +186,8 @@ export default function LifecycleMonitor() {
       if (d.decay_score) return `衰减 ${Number(d.decay_score).toFixed(2)}`;
       if (d.distance) return `距离 ${Number(d.distance).toFixed(3)}`;
       if (d.compressed_count) return `压缩 ${d.compressed_count} 条 → ${d.groups} 组`;
+      if (d.decision) return `审计 ${d.decision}`;
+      if (d.similarity) return `相似度 ${Number(d.similarity).toFixed(3)}`;
       if (d.reason) return d.reason;
       // Hide agent_id-only details
       const keys = Object.keys(d).filter(k => k !== 'agent_id');
@@ -208,6 +212,7 @@ export default function LifecycleMonitor() {
       adjustImportanceFromFeedback: t('lifecycle.phaseFeedback') || '反馈调权',
       synthesizeProfiles: t('lifecycle.phaseProfile') || '画像合成',
       cleanAccessLogs: t('lifecycle.phaseAccessLogs') || '清理访问日志',
+      contradictionAudit: t('lifecycle.phaseContradictionAudit') || '增量矛盾审计',
     };
     return map[key] || key;
   };

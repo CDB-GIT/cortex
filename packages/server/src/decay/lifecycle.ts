@@ -43,7 +43,7 @@ export interface AffectedMemory {
   content: string;
   category: string;
   importance: number;
-  action: 'promote' | 'expire' | 'archive' | 'merge' | 'compress';
+  action: 'promote' | 'expire' | 'archive' | 'merge' | 'compress' | 'audit';
   score?: number;
   reason?: string;
 }
@@ -58,6 +58,7 @@ export interface LifecycleReport {
   decayUpdated?: number;
   relationDecayUpdated?: number;
   profilesSynthesized?: number;
+  contradictionFlagged?: number;
   accessLogsCleaned?: number;
   indexRebuilt: boolean;
   errors: string[];
@@ -151,6 +152,13 @@ interface CompressionResult {
   compressedToCore: number;
   groups: number;
   llmCalls: number;
+}
+
+interface ContradictionAuditResult {
+  flagged: number;
+  candidates: number;
+  llmCalls: number;
+  similarPairs: number;
 }
 
 interface ProfileSynthesisResult {
@@ -272,6 +280,25 @@ export class LifecycleEngine {
         log.info('Phase 3: deduplicateCore (skipped in dry-run)');
         const phaseStart = Date.now();
         recordPhase('deduplicateCore', phaseStart, 0, { reason: 'dry_run' }, true);
+      }
+
+      // Phase 3b: Incremental contradiction audit (flag only)
+      if (this.config.lifecycle.contradictionAudit?.enabled && !dryRun) {
+        log.info('Phase 3b: contradictionAudit');
+        const phaseStart = Date.now();
+        const audit = await this.runContradictionAudit(report.affectedMemories, agentId, llmTracker);
+        report.contradictionFlagged = audit.flagged;
+        recordPhase('contradictionAudit', phaseStart, audit.flagged, {
+          candidates: audit.candidates,
+          llmCalls: audit.llmCalls,
+          similarPairs: audit.similarPairs,
+          mode: this.config.lifecycle.contradictionAudit.mode,
+        });
+      } else {
+        const phaseStart = Date.now();
+        recordPhase('contradictionAudit', phaseStart, 0, {
+          reason: dryRun ? 'dry_run' : 'disabled',
+        }, true);
       }
 
       // Phase 4: Core -> Archive demotion
@@ -644,6 +671,205 @@ export class LifecycleEngine {
     const importanceFactor = entry.importance;
 
     return (baseImportance * 0.3 + accessFactor * 0.4 + importanceFactor * 0.3);
+  }
+
+  private parseMetadata(raw: string | null): Record<string, any> {
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private normalizeSimilarityFromDistance(distance: number): number {
+    if (!Number.isFinite(distance)) return 0;
+    if (distance > 1) {
+      return Math.max(0, Math.min(1, 1 - (distance * distance) / 2));
+    }
+    return Math.max(0, Math.min(1, 1 - distance));
+  }
+
+  private mergeAuditMetadata(existing: Memory, counterpartId: string, decision: string, reason: string): string {
+    const meta = this.parseMetadata(existing.metadata);
+    const currentConflicts = Array.isArray(meta.audit_conflict_with) ? meta.audit_conflict_with : [];
+    const mergedConflicts = Array.from(new Set([...currentConflicts, counterpartId]));
+    return JSON.stringify({
+      ...meta,
+      audit_flag: 'possible_conflict',
+      audit_reason: 'contradiction_llm',
+      audit_conflict_with: mergedConflicts,
+      audit_decision: decision,
+      audit_decision_reason: reason,
+      audit_at: new Date().toISOString(),
+      audit_version: 1,
+    });
+  }
+
+  private async judgeContradiction(
+    memoryA: Memory,
+    memoryB: Memory,
+    llmTracker: LifecycleLLMTracker,
+  ): Promise<{ action: 'keep_a' | 'keep_b' | 'both_valid' | 'needs_review'; reason: string }> {
+    llmTracker.totalCalls++;
+    const raw = await this.llm.complete(
+      `Possible contradiction audit. Compare the two memories and decide whether they conflict.
+
+Memory A:
+- content: ${memoryA.content}
+- category: ${memoryA.category}
+- created_at: ${memoryA.created_at}
+- access_count: ${memoryA.access_count}
+- confidence: ${memoryA.confidence}
+
+Memory B:
+- content: ${memoryB.content}
+- category: ${memoryB.category}
+- created_at: ${memoryB.created_at}
+- access_count: ${memoryB.access_count}
+- confidence: ${memoryB.confidence}
+
+Rules:
+- If both can be true at different times, return both_valid.
+- If one clearly supersedes the other, choose keep_a or keep_b.
+- If unsure, return needs_review.
+
+Return JSON only:
+{"action":"keep_a|keep_b|both_valid|needs_review","reason":"short explanation"}`,
+      { maxTokens: 180, temperature: 0.1 },
+    );
+
+    try {
+      const parsed = JSON.parse(raw);
+      const action = parsed?.action;
+      if (action === 'keep_a' || action === 'keep_b' || action === 'both_valid' || action === 'needs_review') {
+        return {
+          action,
+          reason: typeof parsed?.reason === 'string' ? parsed.reason : '',
+        };
+      }
+    } catch {
+      // fall through
+    }
+
+    return { action: 'needs_review', reason: 'unparseable_llm_response' };
+  }
+
+  private async runContradictionAudit(
+    affected: AffectedMemory[] | undefined,
+    agentId: string | undefined,
+    llmTracker: LifecycleLLMTracker,
+  ): Promise<ContradictionAuditResult> {
+    const db = getDb();
+    const auditConfig = this.config.lifecycle.contradictionAudit;
+    const agentFilter = agentId ? ' AND agent_id = ?' : '';
+    const params = agentId ? [agentId] : [];
+    const lookbackIso = new Date(Date.now() - auditConfig.lookbackDays * 86_400_000).toISOString();
+
+    const candidates = db.prepare(`
+      SELECT *
+      FROM memories
+      WHERE layer = 'core'
+        AND superseded_by IS NULL
+        AND is_pinned = 0
+        AND (
+          source LIKE 'lifecycle:%'
+          OR created_at > ?
+          OR confidence < ?
+          OR id IN (
+            SELECT memory_id FROM memory_feedback
+            WHERE signal IN ('not_helpful', 'outdated', 'wrong')
+          )
+          OR id IN (
+            SELECT memory_id FROM extraction_feedback
+            WHERE feedback IN ('bad', 'corrected')
+          )
+        )${agentFilter}
+      ORDER BY
+        CASE WHEN confidence < ? THEN 0 ELSE 1 END,
+        created_at DESC
+      LIMIT ?
+    `).all(
+      lookbackIso,
+      auditConfig.lowConfidenceThreshold,
+      ...params,
+      auditConfig.lowConfidenceThreshold,
+      auditConfig.maxCandidates,
+    ) as Memory[];
+
+    if (candidates.length === 0) {
+      return { flagged: 0, candidates: 0, llmCalls: 0, similarPairs: 0 };
+    }
+
+    const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+    const auditedPairs = new Set<string>();
+    let flagged = 0;
+    let llmCalls = 0;
+    let similarPairs = 0;
+
+    for (const candidate of candidates) {
+      try {
+        const embedding = await this.embeddingProvider.embed(candidate.content);
+        if (embedding.length === 0) continue;
+
+        const hits = await this.vectorBackend.search(embedding, auditConfig.candidateTopK + 1, { agent_id: candidate.agent_id });
+        for (const hit of hits) {
+          if (hit.id === candidate.id) continue;
+
+          const counterpart = candidateById.get(hit.id)
+            || db.prepare("SELECT * FROM memories WHERE id = ? AND layer = 'core' AND superseded_by IS NULL AND is_pinned = 0").get(hit.id) as Memory | undefined;
+          if (!counterpart) continue;
+          if (counterpart.agent_id !== candidate.agent_id) continue;
+          if (counterpart.category !== candidate.category) continue;
+
+          const similarity = this.normalizeSimilarityFromDistance(hit.distance);
+          if (similarity < auditConfig.minNormalizedSimilarity) continue;
+
+          const pairKey = [candidate.id, counterpart.id].sort().join('::');
+          if (auditedPairs.has(pairKey)) continue;
+          auditedPairs.add(pairKey);
+          similarPairs++;
+
+          if (llmCalls >= auditConfig.maxLLMCalls) {
+            return { flagged, candidates: candidates.length, llmCalls, similarPairs };
+          }
+
+          const decision = await this.judgeContradiction(candidate, counterpart, llmTracker);
+          llmCalls++;
+          if (decision.action === 'both_valid') continue;
+
+          const candidateMeta = this.mergeAuditMetadata(candidate, counterpart.id, decision.action, decision.reason);
+          const counterpartMeta = this.mergeAuditMetadata(counterpart, candidate.id, decision.action, decision.reason);
+          updateMemory(candidate.id, { metadata: candidateMeta });
+          updateMemory(counterpart.id, { metadata: counterpartMeta });
+          insertLifecycleLog('contradiction_audit_flagged', [candidate.id, counterpart.id], {
+            agent_id: agentId || candidate.agent_id,
+            decision: decision.action,
+            reason: decision.reason,
+            similarity: Number(similarity.toFixed(3)),
+            mode: auditConfig.mode,
+          });
+          flagged++;
+
+          if (affected) {
+            affected.push({
+              id: candidate.id,
+              content: candidate.content,
+              category: candidate.category,
+              importance: candidate.importance,
+              action: 'audit',
+              score: similarity,
+              reason: `possible_conflict:${decision.action}`,
+            });
+          }
+        }
+      } catch (e: any) {
+        log.warn({ error: e.message, memory_id: candidate.id }, 'Contradiction audit skipped candidate');
+      }
+    }
+
+    return { flagged, candidates: candidates.length, llmCalls, similarPairs };
   }
 
   private computeDecayScoreForStats(entry: LifecycleStatsMemoryRow, lambda: number): number {

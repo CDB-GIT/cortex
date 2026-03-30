@@ -113,6 +113,16 @@ const CortexConfigSchema = z.object({
     promotionThreshold: z.number().default(0.6),
     archiveThreshold: z.number().default(0.2),
     decayLambda: z.number().default(0.03),
+    contradictionAudit: z.object({
+      enabled: z.boolean().default(false),
+      lookbackDays: z.number().min(1).max(90).default(7),
+      candidateTopK: z.number().min(1).max(20).default(5),
+      maxCandidates: z.number().min(1).max(200).default(50),
+      maxLLMCalls: z.number().min(1).max(100).default(20),
+      lowConfidenceThreshold: z.number().min(0.05).max(0.9).default(0.4),
+      minNormalizedSimilarity: z.number().min(0.1).max(0.99).default(0.75),
+      mode: z.enum(['flag_only']).default('flag_only'),
+    }).default({}),
   }).default({}),
   selfImprovement: z.object({
     enabled: z.boolean().default(true),
