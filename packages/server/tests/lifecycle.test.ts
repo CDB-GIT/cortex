@@ -13,6 +13,15 @@ function createMockLLM(): LLMProvider {
       if (prompt.includes('Possible contradiction audit')) {
         return JSON.stringify({ action: 'keep_b', reason: 'newer memory supersedes older memory' });
       }
+      if (prompt.includes('Extract long-term user preferences')) {
+        return JSON.stringify([
+          {
+            content: 'User prefers async, low-interruption work sessions.',
+            source_memories: ['pref-src-1'],
+            confidence: 0.82,
+          },
+        ]);
+      }
       return 'Merged summary of memories.';
     }),
   };
@@ -197,5 +206,55 @@ describe('LifecycleEngine', () => {
     expect(stats.analysis).toBeDefined();
     expect(typeof stats.analysis.recommendation.shouldAdjust).toBe('boolean');
     expect(Array.isArray(stats.analysis.recommendation.reasons)).toBe(true);
+  });
+
+  it('should extract new preferences from recent promoted memories', async () => {
+    const prefConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        preferenceExtraction: {
+          enabled: true,
+          lookbackDays: 7,
+          maxNewPreferences: 3,
+          maxLLMCalls: 2,
+          dedupSimilarity: 0.85,
+        },
+      },
+    });
+
+    const prefLifecycle = new LifecycleEngine(createMockLLM(), createMockEmbedding(), createMockVector(), prefConfig);
+
+    const source = insertMemory({
+      id: 'pref-src-1',
+      layer: 'core',
+      category: 'fact',
+      content: 'User asked to batch interruptions and prefers async updates.',
+      agent_id: 'pref-test',
+      confidence: 0.8,
+      importance: 0.7,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+    getDb().prepare("UPDATE memories SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), source.id);
+
+    const report = await prefLifecycle.run(false, 'manual', 'pref-test');
+    expect(report.preferencesExtracted).toBeGreaterThanOrEqual(1);
+
+    const created = getDb().prepare(`
+      SELECT * FROM memories
+      WHERE agent_id = 'pref-test'
+        AND category = 'preference'
+        AND source = 'lifecycle:preference-extraction'
+        AND superseded_by IS NULL
+    `).all() as any[];
+    expect(created.length).toBeGreaterThanOrEqual(1);
+    expect(created[0].content).toContain('async');
   });
 });

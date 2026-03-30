@@ -40,6 +40,18 @@ export default function LifecycleSection({
             t('settings.contradictionAuditLowConfidenceThresholdDesc'),
             'contradictionAudit.lowConfidenceThreshold', 0.05, 0.9, 0.05,
           )}
+          {renderToggleField(
+            t('settings.preferenceExtractionEnabled'),
+            t('settings.preferenceExtractionEnabledDesc'),
+            'preferenceExtraction.enabled',
+          )}
+          {renderNumberField(
+            t('settings.preferenceExtractionMaxNew'),
+            t('settings.preferenceExtractionMaxNewDesc'),
+            'preferenceExtraction.maxNewPreferences',
+            1,
+            20,
+          )}
           {renderSlider(
             t('settings.promotionThreshold'),
             t('settings.promotionThresholdDesc'),
@@ -63,6 +75,8 @@ export default function LifecycleSection({
             {displayRow(t('settings.contradictionAuditEnabled'), config.lifecycle?.contradictionAudit?.enabled ? t('common.on') : t('common.off'), t('settings.contradictionAuditEnabledDesc'))}
             {displayRow(t('settings.contradictionAuditMaxLlmCalls'), config.lifecycle?.contradictionAudit?.maxLLMCalls ?? 20, t('settings.contradictionAuditMaxLlmCallsDesc'))}
             {displayRow(t('settings.contradictionAuditLowConfidenceThreshold'), (config.lifecycle?.contradictionAudit?.lowConfidenceThreshold ?? 0.4).toFixed(2), t('settings.contradictionAuditLowConfidenceThresholdDesc'))}
+            {displayRow(t('settings.preferenceExtractionEnabled'), config.lifecycle?.preferenceExtraction?.enabled ? t('common.on') : t('common.off'), t('settings.preferenceExtractionEnabledDesc'))}
+            {displayRow(t('settings.preferenceExtractionMaxNew'), config.lifecycle?.preferenceExtraction?.maxNewPreferences ?? 5, t('settings.preferenceExtractionMaxNewDesc'))}
             {displayRow(t('settings.promotionThreshold'), config.lifecycle?.promotionThreshold?.toFixed(2), t('settings.promotionThresholdDesc'))}
             {displayRow(t('settings.archiveThreshold'), config.lifecycle?.archiveThreshold?.toFixed(2), t('settings.archiveThresholdDesc'))}
             {displayRow(t('settings.decayLambda'), config.lifecycle?.decayLambda?.toFixed(3), t('settings.decayLambdaDesc'))}

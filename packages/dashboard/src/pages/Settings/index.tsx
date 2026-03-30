@@ -149,6 +149,10 @@ export default function Settings() {
             maxLLMCalls: config.lifecycle?.contradictionAudit?.maxLLMCalls ?? 20,
             lowConfidenceThreshold: config.lifecycle?.contradictionAudit?.lowConfidenceThreshold ?? 0.4,
           },
+          preferenceExtraction: {
+            enabled: config.lifecycle?.preferenceExtraction?.enabled ?? false,
+            maxNewPreferences: config.lifecycle?.preferenceExtraction?.maxNewPreferences ?? 5,
+          },
         };
       },
       layers: () => ({
@@ -270,11 +274,13 @@ export default function Settings() {
       const dl = Number(draft.decayLambda);
       const maxLlmCalls = Number(draft.contradictionAudit?.maxLLMCalls);
       const lowConfidenceThreshold = Number(draft.contradictionAudit?.lowConfidenceThreshold);
+      const maxNewPreferences = Number(draft.preferenceExtraction?.maxNewPreferences);
       if (isNaN(pt) || pt < 0 || pt > 1) errors.push(t('settings.validationThresholdRange'));
       if (isNaN(at) || at < 0 || at > 1) errors.push(t('settings.validationThresholdRange'));
       if (isNaN(dl) || dl <= 0 || dl > 0.5) errors.push(t('settings.validationDecayRange'));
       if (isNaN(maxLlmCalls) || maxLlmCalls < 1 || maxLlmCalls > 100) errors.push(t('settings.validationPositiveNumber'));
       if (isNaN(lowConfidenceThreshold) || lowConfidenceThreshold < 0.05 || lowConfidenceThreshold > 0.9) errors.push(t('settings.validationThresholdRange'));
+      if (isNaN(maxNewPreferences) || maxNewPreferences < 1 || maxNewPreferences > 20) errors.push(t('settings.validationPositiveNumber'));
       if (draft.customSchedule && draft.schedule && !/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(draft.schedule)) {
         errors.push(t('settings.validationCronFormat'));
       }
@@ -404,6 +410,11 @@ export default function Settings() {
             enabled: draft.contradictionAudit?.enabled ?? false,
             maxLLMCalls: Number(draft.contradictionAudit?.maxLLMCalls ?? 20),
             lowConfidenceThreshold: Number(draft.contradictionAudit?.lowConfidenceThreshold ?? 0.4),
+          },
+          preferenceExtraction: {
+            ...(config.lifecycle?.preferenceExtraction ?? {}),
+            enabled: draft.preferenceExtraction?.enabled ?? false,
+            maxNewPreferences: Number(draft.preferenceExtraction?.maxNewPreferences ?? 5),
           },
         };
       } else if (section === 'layers') {

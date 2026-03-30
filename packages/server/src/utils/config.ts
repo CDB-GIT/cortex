@@ -123,6 +123,13 @@ const CortexConfigSchema = z.object({
       minNormalizedSimilarity: z.number().min(0.1).max(0.99).default(0.75),
       mode: z.enum(['flag_only']).default('flag_only'),
     }).default({}),
+    preferenceExtraction: z.object({
+      enabled: z.boolean().default(false),
+      lookbackDays: z.number().min(1).max(30).default(7),
+      maxNewPreferences: z.number().min(1).max(20).default(5),
+      maxLLMCalls: z.number().min(1).max(20).default(3),
+      dedupSimilarity: z.number().min(0.1).max(0.99).default(0.85),
+    }).default({}),
   }).default({}),
   selfImprovement: z.object({
     enabled: z.boolean().default(true),

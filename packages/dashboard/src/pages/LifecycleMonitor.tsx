@@ -204,6 +204,7 @@ export default function LifecycleMonitor() {
     const map: Record<string, string> = {
       cleanExpiredWorking: t('lifecycle.phaseCleanExpired') || '清理过期 Working',
       promoteToCore: t('lifecycle.phasePromote') || '晋升到 Core',
+      extractPreferences: t('lifecycle.phasePreferenceExtraction') || '主动偏好提取',
       deduplicateCore: t('lifecycle.phaseDeduplicate') || 'Core 去重',
       archiveStale: t('lifecycle.phaseArchive') || '归档陈旧记忆',
       compressArchive: t('lifecycle.phaseCompress') || 'Archive 压缩回流',
@@ -517,6 +518,7 @@ export default function LifecycleMonitor() {
           <h3 style={{ marginBottom: 12 }}>{t('lifecycle.lastRunResult')}</h3>
           <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))' }}>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.promoted')}</div><div className="value">{runResult.promoted}</div></div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.preferencesExtracted') || '偏好提取'}</div><div className="value">{runResult.preferencesExtracted ?? 0}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.merged')}</div><div className="value">{runResult.merged}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.archived')}</div><div className="value">{runResult.archived}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.compressed')}</div><div className="value">{runResult.compressedToCore}</div></div>

@@ -50,6 +50,7 @@ export interface AffectedMemory {
 
 export interface LifecycleReport {
   promoted: number;
+  preferencesExtracted?: number;
   merged: number;
   archived: number;
   compressedToCore: number;
@@ -83,6 +84,7 @@ export interface LifecycleObservability {
     totalCalls: number;
     compressionCalls: number;
     profileSynthesisCalls: number;
+    preferenceExtractionCalls: number;
   };
 }
 
@@ -146,6 +148,7 @@ interface LifecycleLLMTracker {
   totalCalls: number;
   compressionCalls: number;
   profileSynthesisCalls: number;
+  preferenceExtractionCalls: number;
 }
 
 interface CompressionResult {
@@ -159,6 +162,12 @@ interface ContradictionAuditResult {
   candidates: number;
   llmCalls: number;
   similarPairs: number;
+}
+
+interface PreferenceExtractionResult {
+  extracted: number;
+  llmCalls: number;
+  agentsProcessed: number;
 }
 
 interface ProfileSynthesisResult {
@@ -207,7 +216,7 @@ export class LifecycleEngine {
         durationMs: 0,
         observability: {
           phases: [],
-          llm: { totalCalls: 0, compressionCalls: 0, profileSynthesisCalls: 0 },
+          llm: { totalCalls: 0, compressionCalls: 0, profileSynthesisCalls: 0, preferenceExtractionCalls: 0 },
         },
       };
     }
@@ -229,13 +238,14 @@ export class LifecycleEngine {
       affectedMemories: dryRun ? [] : undefined,
       observability: {
         phases: [],
-        llm: { totalCalls: 0, compressionCalls: 0, profileSynthesisCalls: 0 },
+        llm: { totalCalls: 0, compressionCalls: 0, profileSynthesisCalls: 0, preferenceExtractionCalls: 0 },
       },
     };
     const llmTracker: LifecycleLLMTracker = {
       totalCalls: 0,
       compressionCalls: 0,
       profileSynthesisCalls: 0,
+      preferenceExtractionCalls: 0,
     };
     const recordPhase = (
       key: string,
@@ -268,6 +278,23 @@ export class LifecycleEngine {
         const phaseStart = Date.now();
         report.promoted = await this.promoteToCore(dryRun, report.affectedMemories, agentId);
         recordPhase('promoteToCore', phaseStart, report.promoted);
+      }
+
+      // Phase 2b: Extract long-term preferences from recent promoted memories
+      if (this.config.lifecycle.preferenceExtraction?.enabled && !dryRun) {
+        log.info('Phase 2b: extractPreferences');
+        const phaseStart = Date.now();
+        const extraction = await this.extractPreferences(agentId, llmTracker);
+        report.preferencesExtracted = extraction.extracted;
+        recordPhase('extractPreferences', phaseStart, extraction.extracted, {
+          agents: extraction.agentsProcessed,
+          llmCalls: extraction.llmCalls,
+        });
+      } else {
+        const phaseStart = Date.now();
+        recordPhase('extractPreferences', phaseStart, 0, {
+          reason: dryRun ? 'dry_run' : 'disabled',
+        }, true);
       }
 
       // Phase 3: Core dedup and merge (skip in dry-run — O(N) embedding calls)
@@ -691,6 +718,20 @@ export class LifecycleEngine {
     return Math.max(0, Math.min(1, 1 - distance));
   }
 
+  private cosineSimilarity(a: number[], b: number[]): number {
+    if (a.length === 0 || b.length === 0 || a.length !== b.length) return 0;
+    let dot = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i]! * b[i]!;
+      normA += a[i]! * a[i]!;
+      normB += b[i]! * b[i]!;
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  }
+
   private mergeAuditMetadata(existing: Memory, counterpartId: string, decision: string, reason: string): string {
     const meta = this.parseMetadata(existing.metadata);
     const currentConflicts = Array.isArray(meta.audit_conflict_with) ? meta.audit_conflict_with : [];
@@ -870,6 +911,164 @@ Return JSON only:
     }
 
     return { flagged, candidates: candidates.length, llmCalls, similarPairs };
+  }
+
+  private parsePreferenceExtractionResponse(raw: string): Array<{ content: string; source_memories?: string[]; confidence?: number }> {
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((item) => item && typeof item.content === 'string' && item.content.trim())
+        .map((item) => ({
+          content: item.content.trim(),
+          source_memories: Array.isArray(item.source_memories)
+            ? item.source_memories.filter((id: unknown) => typeof id === 'string')
+            : undefined,
+          confidence: typeof item.confidence === 'number' ? item.confidence : undefined,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  private async extractPreferences(agentId: string | undefined, llmTracker: LifecycleLLMTracker): Promise<PreferenceExtractionResult> {
+    const db = getDb();
+    const prefConfig = this.config.lifecycle.preferenceExtraction;
+    const agentFilter = agentId ? ' AND agent_id = ?' : '';
+    const params = agentId ? [agentId] : [];
+    const lookbackIso = new Date(Date.now() - prefConfig.lookbackDays * 86_400_000).toISOString();
+
+    const recentCore = db.prepare(`
+      SELECT *
+      FROM memories
+      WHERE layer = 'core'
+        AND superseded_by IS NULL
+        AND category IN ('fact', 'insight', 'decision')
+        AND source IN ('lifecycle:promotion', 'lifecycle:auto-promotion')
+        AND updated_at > ?${agentFilter}
+      ORDER BY agent_id, updated_at DESC
+    `).all(lookbackIso, ...params) as Memory[];
+
+    if (recentCore.length === 0) {
+      return { extracted: 0, llmCalls: 0, agentsProcessed: 0 };
+    }
+
+    const grouped = new Map<string, Memory[]>();
+    for (const memory of recentCore) {
+      const list = grouped.get(memory.agent_id) || [];
+      list.push(memory);
+      grouped.set(memory.agent_id, list);
+    }
+
+    let extracted = 0;
+    let llmCalls = 0;
+    let agentsProcessed = 0;
+
+    for (const [currentAgentId, memories] of grouped) {
+      if (llmCalls >= prefConfig.maxLLMCalls) break;
+
+      const existingPreferences = db.prepare(`
+        SELECT * FROM memories
+        WHERE layer = 'core'
+          AND category = 'preference'
+          AND superseded_by IS NULL
+          AND agent_id = ?
+        ORDER BY updated_at DESC
+      `).all(currentAgentId) as Memory[];
+
+      const memoriesText = memories
+        .slice(0, 12)
+        .map((memory) => `- [${memory.id}] ${memory.content}`)
+        .join('\n');
+      const existingText = existingPreferences
+        .slice(0, 10)
+        .map((memory) => `- ${memory.content}`)
+        .join('\n');
+
+      llmCalls++;
+      llmTracker.totalCalls++;
+      llmTracker.preferenceExtractionCalls++;
+      const raw = await this.llm.complete(
+        `Extract long-term user preferences from the recent memories below.
+
+Only extract durable preferences, habits, likes/dislikes, or working style.
+Do not extract one-off events, timestamps, or temporary context.
+Avoid duplicates with existing preferences.
+
+Existing preferences:
+${existingText || '- none'}
+
+Recent memories:
+${memoriesText}
+
+Return JSON array only:
+[{"content":"...", "source_memories":["memory_id"], "confidence":0.8}]`,
+        { maxTokens: 280, temperature: 0.2 },
+      );
+
+      const candidates = this.parsePreferenceExtractionResponse(raw);
+      if (candidates.length === 0) {
+        agentsProcessed++;
+        continue;
+      }
+
+      const existingEmbeddings = new Map<string, number[]>();
+      for (const existing of existingPreferences) {
+        try {
+          const embedding = await this.embeddingProvider.embed(existing.content);
+          if (embedding.length > 0) existingEmbeddings.set(existing.id, embedding);
+        } catch {
+          // best effort
+        }
+      }
+
+      for (const candidate of candidates) {
+        if (extracted >= prefConfig.maxNewPreferences) break;
+        const candidateEmbedding = await this.embeddingProvider.embed(candidate.content);
+        if (candidateEmbedding.length === 0) continue;
+
+        let duplicated = false;
+        for (const [, existingEmbedding] of existingEmbeddings) {
+          const similarity = this.cosineSimilarity(candidateEmbedding, existingEmbedding);
+          if (similarity >= prefConfig.dedupSimilarity) {
+            duplicated = true;
+            break;
+          }
+        }
+        if (duplicated) continue;
+
+        const metadata = JSON.stringify({
+          source_memories: candidate.source_memories ?? memories.map((memory) => memory.id),
+          extraction_type: 'preference_extraction',
+          extracted_at: new Date().toISOString(),
+        });
+        const inserted = insertMemory({
+          layer: 'core',
+          category: 'preference',
+          content: candidate.content,
+          importance: 0.75,
+          confidence: Math.max(0.7, Math.min(1, candidate.confidence ?? 0.8)),
+          agent_id: currentAgentId,
+          source: 'lifecycle:preference-extraction',
+          metadata,
+        });
+        try {
+          await this.vectorBackend.upsert(inserted.id, candidateEmbedding);
+        } catch {
+          // best effort
+        }
+        insertLifecycleLog('preference_extracted', [inserted.id], {
+          agent_id: currentAgentId,
+          source_memories: candidate.source_memories ?? memories.map((memory) => memory.id),
+        });
+        extracted++;
+      }
+
+      agentsProcessed++;
+      if (extracted >= prefConfig.maxNewPreferences) break;
+    }
+
+    return { extracted, llmCalls, agentsProcessed };
   }
 
   private computeDecayScoreForStats(entry: LifecycleStatsMemoryRow, lambda: number): number {
