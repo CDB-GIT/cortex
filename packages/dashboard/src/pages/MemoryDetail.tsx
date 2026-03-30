@@ -1,5 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { getMemory, updateMemory, search, getMemoryChain, rollbackMemory } from '../api/client.js';
+import {
+  getMemory,
+  updateMemory,
+  search,
+  getMemoryChain,
+  rollbackMemory,
+  resolveDuplicatePreference,
+  rollbackDuplicatePreferenceResolution,
+  resolveTimelineUpdate,
+  rollbackTimelineUpdateResolution,
+  resolveConflictReview,
+  rollbackConflictReviewResolution,
+} from '../api/client.js';
 import { useI18n } from '../i18n/index.js';
 import { toLocal } from '../utils/time.js';
 
@@ -19,6 +31,44 @@ interface Memory {
   agent_id?: string;
   source?: string;
   is_pinned?: number;
+}
+
+interface DuplicateResolutionMeta {
+  resolution_id: string;
+  resolution_type: 'manual_keep_one_supersede_others';
+  role: 'keeper' | 'superseded';
+  keeper_id: string;
+  duplicate_group_ids: string[];
+  superseded_ids: string[];
+  resolved_at: string;
+}
+
+interface AuditTimelineMeta {
+  audit_kind?: 'timeline_update_candidate' | 'conflict_needs_review';
+  audit_timeline_role?: 'current_candidate' | 'history_candidate';
+  audit_current_candidate_id?: string;
+  audit_history_candidate_id?: string;
+  audit_conflict_with?: string[];
+  audit_decision?: string;
+  audit_decision_reason?: string;
+}
+
+interface TimelineResolutionMeta {
+  resolution_id: string;
+  resolution_type: 'manual_timeline_confirm_current';
+  role: 'current' | 'history';
+  current_id: string;
+  history_id: string;
+  resolved_at: string;
+}
+
+interface ConflictResolutionMeta {
+  resolution_id: string;
+  resolution_type: 'manual_conflict_confirm_winner';
+  role: 'winner' | 'superseded';
+  winner_id: string;
+  superseded_id: string;
+  resolved_at: string;
 }
 
 const CATEGORIES = ['identity', 'preference', 'decision', 'fact', 'entity', 'correction', 'todo', 'context', 'summary', 'skill', 'relationship', 'goal', 'insight', 'project_state', 'constraint', 'policy', 'agent_self_improvement', 'agent_user_habit', 'agent_relationship', 'agent_persona'];
@@ -93,8 +143,17 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
   const [similar, setSimilar] = useState<any[]>([]);
   const [loadingContext, setLoadingContext] = useState(false);
   const [duplicatePeers, setDuplicatePeers] = useState<Memory[]>([]);
+  const [conflictPeers, setConflictPeers] = useState<Memory[]>([]);
   const [showDuplicateSuggestion, setShowDuplicateSuggestion] = useState(false);
   const [loadingDuplicatePeers, setLoadingDuplicatePeers] = useState(false);
+  const [loadingConflictPeers, setLoadingConflictPeers] = useState(false);
+  const [selectedDuplicateKeeperId, setSelectedDuplicateKeeperId] = useState('');
+  const [resolvingDuplicate, setResolvingDuplicate] = useState(false);
+  const [rollingBackDuplicateResolution, setRollingBackDuplicateResolution] = useState(false);
+  const [resolvingTimelineUpdate, setResolvingTimelineUpdate] = useState(false);
+  const [rollingBackTimelineUpdate, setRollingBackTimelineUpdate] = useState(false);
+  const [resolvingConflictReview, setResolvingConflictReview] = useState(false);
+  const [rollingBackConflictReview, setRollingBackConflictReview] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<{ content: string; category: string; importance: number; is_pinned: boolean }>({ content: '', category: '', importance: 0, is_pinned: false });
@@ -138,6 +197,38 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
       })
       .finally(() => {
         if (!cancelled) setLoadingDuplicatePeers(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [memory?.id, memory?.metadata]);
+
+  useEffect(() => {
+    if (!memory) {
+      setConflictPeers([]);
+      return;
+    }
+
+    const currentMeta = parseMeta(memory);
+    const conflictIds = Array.isArray(currentMeta?.audit_conflict_with)
+      ? currentMeta.audit_conflict_with.filter((id: unknown) => typeof id === 'string' && id.trim())
+      : [];
+
+    if (conflictIds.length === 0) {
+      setConflictPeers([]);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingConflictPeers(true);
+    Promise.all(conflictIds.map((id: string) => getMemory(id).catch(() => null)))
+      .then((items) => {
+        if (cancelled) return;
+        setConflictPeers(items.filter(Boolean));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingConflictPeers(false);
       });
 
     return () => {
@@ -236,6 +327,47 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
     ? meta.preference_duplicate_with.filter((id: unknown) => typeof id === 'string' && id.trim())
     : [];
   const auditFlag = typeof meta?.audit_flag === 'string' ? meta.audit_flag : null;
+  const auditMeta = (meta || {}) as AuditTimelineMeta;
+  const auditKind = typeof auditMeta.audit_kind === 'string' ? auditMeta.audit_kind : null;
+  const auditTimelineRole = typeof auditMeta.audit_timeline_role === 'string' ? auditMeta.audit_timeline_role : null;
+  const conflictIds = Array.isArray(auditMeta.audit_conflict_with)
+    ? auditMeta.audit_conflict_with.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    : [];
+  const currentTimelineCandidateId = typeof auditMeta.audit_current_candidate_id === 'string' ? auditMeta.audit_current_candidate_id : null;
+  const historyTimelineCandidateId = typeof auditMeta.audit_history_candidate_id === 'string' ? auditMeta.audit_history_candidate_id : null;
+  const auditDecisionReason = typeof auditMeta.audit_decision_reason === 'string' ? auditMeta.audit_decision_reason : null;
+  const timelineResolution = (() => {
+    if (!meta?.timeline_resolution || typeof meta.timeline_resolution !== 'object') return null;
+    const candidate = meta.timeline_resolution as Partial<TimelineResolutionMeta>;
+    if (!candidate || (candidate.role !== 'current' && candidate.role !== 'history')) return null;
+    if (typeof candidate.resolution_id !== 'string' || typeof candidate.current_id !== 'string' || typeof candidate.history_id !== 'string') {
+      return null;
+    }
+    return {
+      resolution_id: candidate.resolution_id,
+      resolution_type: 'manual_timeline_confirm_current',
+      role: candidate.role,
+      current_id: candidate.current_id,
+      history_id: candidate.history_id,
+      resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : memory.updated_at,
+    } satisfies TimelineResolutionMeta;
+  })();
+  const conflictResolution = (() => {
+    if (!meta?.conflict_resolution || typeof meta.conflict_resolution !== 'object') return null;
+    const candidate = meta.conflict_resolution as Partial<ConflictResolutionMeta>;
+    if (!candidate || (candidate.role !== 'winner' && candidate.role !== 'superseded')) return null;
+    if (typeof candidate.resolution_id !== 'string' || typeof candidate.winner_id !== 'string' || typeof candidate.superseded_id !== 'string') {
+      return null;
+    }
+    return {
+      resolution_id: candidate.resolution_id,
+      resolution_type: 'manual_conflict_confirm_winner',
+      role: candidate.role,
+      winner_id: candidate.winner_id,
+      superseded_id: candidate.superseded_id,
+      resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : memory.updated_at,
+    } satisfies ConflictResolutionMeta;
+  })();
   const duplicateCandidates = [memory, ...duplicatePeers].filter(
     (candidate, index, list) => list.findIndex((item) => item.id === candidate.id) === index,
   );
@@ -259,6 +391,165 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
     : recommendedDuplicateKeeper?.id === memory.id
       ? t('memoryDetail.duplicateSuggestCurrent')
       : t('memoryDetail.duplicateSuggestEvidence');
+  const selectedDuplicateKeeper = sortedDuplicateCandidates.find((candidate) => candidate.id === selectedDuplicateKeeperId) || null;
+  const selectedDuplicateSupersededCount = Math.max(0, sortedDuplicateCandidates.length - (selectedDuplicateKeeper ? 1 : 0));
+  const duplicateResolution = (() => {
+    if (!meta?.duplicate_resolution || typeof meta.duplicate_resolution !== 'object') return null;
+    const candidate = meta.duplicate_resolution as Partial<DuplicateResolutionMeta>;
+    if (
+      !candidate
+      || (candidate.role !== 'keeper' && candidate.role !== 'superseded')
+      || typeof candidate.resolution_id !== 'string'
+      || typeof candidate.keeper_id !== 'string'
+    ) {
+      return null;
+    }
+    return {
+      resolution_id: candidate.resolution_id,
+      resolution_type: 'manual_keep_one_supersede_others',
+      role: candidate.role,
+      keeper_id: candidate.keeper_id,
+      duplicate_group_ids: Array.isArray(candidate.duplicate_group_ids) ? candidate.duplicate_group_ids.filter((id): id is string => typeof id === 'string') : [],
+      superseded_ids: Array.isArray(candidate.superseded_ids) ? candidate.superseded_ids.filter((id): id is string => typeof id === 'string') : [],
+      resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : memory.updated_at,
+    } satisfies DuplicateResolutionMeta;
+  })();
+
+  const handleResolveDuplicate = async () => {
+    if (!memory || !selectedDuplicateKeeperId) return;
+    if (!confirm(t('memoryDetail.duplicateResolveConfirm'))) return;
+
+    setResolvingDuplicate(true);
+    try {
+      const res = await resolveDuplicatePreference(memory.id, {
+        keeper_id: selectedDuplicateKeeperId,
+        memory_ids: sortedDuplicateCandidates.map((candidate) => candidate.id),
+      });
+      setShowDuplicateSuggestion(false);
+      setToast({ message: t('memoryDetail.duplicateResolveSuccess'), type: 'success' });
+      await loadMemoryData(res.keeper?.id || selectedDuplicateKeeperId);
+      window.scrollTo(0, 0);
+    } catch (e: any) {
+      setToast({ message: t('memoryDetail.duplicateResolveFailed', { message: e.message }), type: 'error' });
+    } finally {
+      setResolvingDuplicate(false);
+    }
+  };
+
+  const handleRollbackDuplicateResolution = async () => {
+    if (!memory || !duplicateResolution || duplicateResolution.role !== 'keeper') return;
+    if (!confirm(t('memoryDetail.duplicateRollbackConfirm'))) return;
+
+    setRollingBackDuplicateResolution(true);
+    try {
+      await rollbackDuplicatePreferenceResolution(memory.id, {
+        resolution_id: duplicateResolution.resolution_id,
+      });
+      setToast({ message: t('memoryDetail.duplicateRollbackSuccess'), type: 'success' });
+      await loadMemoryData(memory.id);
+    } catch (e: any) {
+      setToast({ message: t('memoryDetail.duplicateResolveFailed', { message: e.message }), type: 'error' });
+    } finally {
+      setRollingBackDuplicateResolution(false);
+    }
+  };
+
+  const handleResolveTimelineUpdate = async () => {
+    if (!memory || !currentTimelineCandidateId || !historyTimelineCandidateId) return;
+    if (!confirm(t('memoryDetail.timelineResolveConfirm'))) return;
+
+    setResolvingTimelineUpdate(true);
+    try {
+      const res = await resolveTimelineUpdate(memory.id, {
+        current_id: currentTimelineCandidateId,
+        history_id: historyTimelineCandidateId,
+      });
+      setToast({ message: t('memoryDetail.timelineResolveSuccess'), type: 'success' });
+      await loadMemoryData(res.current?.id || currentTimelineCandidateId);
+      window.scrollTo(0, 0);
+    } catch (e: any) {
+      setToast({ message: t('memoryDetail.timelineResolveFailed', { message: e.message }), type: 'error' });
+    } finally {
+      setResolvingTimelineUpdate(false);
+    }
+  };
+
+  const handleRollbackTimelineUpdate = async () => {
+    if (!memory || !timelineResolution || timelineResolution.role !== 'current') return;
+    if (!confirm(t('memoryDetail.timelineRollbackConfirm'))) return;
+
+    setRollingBackTimelineUpdate(true);
+    try {
+      await rollbackTimelineUpdateResolution(memory.id, {
+        resolution_id: timelineResolution.resolution_id,
+      });
+      setToast({ message: t('memoryDetail.timelineRollbackSuccess'), type: 'success' });
+      await loadMemoryData(memory.id);
+    } catch (e: any) {
+      setToast({ message: t('memoryDetail.timelineResolveFailed', { message: e.message }), type: 'error' });
+    } finally {
+      setRollingBackTimelineUpdate(false);
+    }
+  };
+
+  const getUserFacingAuditReason = () => {
+    if (timelineResolution?.role === 'current') return t('memoryDetail.timelineReasonCurrentResolved');
+    if (timelineResolution?.role === 'history') return t('memoryDetail.timelineReasonHistoryResolved');
+    if (auditKind === 'timeline_update_candidate') {
+      if (auditTimelineRole === 'current_candidate') return t('memoryDetail.timelineReasonCurrentCandidate');
+      if (auditTimelineRole === 'history_candidate') return t('memoryDetail.timelineReasonHistoryCandidate');
+    }
+    if (auditFlag === 'possible_conflict') {
+      return t('memoryDetail.conflictReasonNeedsReview');
+    }
+    return auditDecisionReason;
+  };
+
+  const userFacingAuditReason = getUserFacingAuditReason();
+  const primaryConflictPeer = conflictPeers[0] || null;
+
+  const openDuplicateSuggestion = () => {
+    setSelectedDuplicateKeeperId(recommendedDuplicateKeeper?.id || memory.id);
+    setShowDuplicateSuggestion(true);
+  };
+
+  const handleResolveConflictReview = async (winnerId: string, supersededId: string) => {
+    if (!memory) return;
+    if (!confirm(t('memoryDetail.conflictResolveConfirm'))) return;
+
+    setResolvingConflictReview(true);
+    try {
+      const res = await resolveConflictReview(memory.id, {
+        winner_id: winnerId,
+        superseded_id: supersededId,
+      });
+      setToast({ message: t('memoryDetail.conflictResolveSuccess'), type: 'success' });
+      await loadMemoryData(res.winner?.id || winnerId);
+      window.scrollTo(0, 0);
+    } catch (e: any) {
+      setToast({ message: t('memoryDetail.conflictResolveFailed', { message: e.message }), type: 'error' });
+    } finally {
+      setResolvingConflictReview(false);
+    }
+  };
+
+  const handleRollbackConflictReview = async () => {
+    if (!memory || !conflictResolution || conflictResolution.role !== 'winner') return;
+    if (!confirm(t('memoryDetail.conflictRollbackConfirm'))) return;
+
+    setRollingBackConflictReview(true);
+    try {
+      await rollbackConflictReviewResolution(memory.id, {
+        resolution_id: conflictResolution.resolution_id,
+      });
+      setToast({ message: t('memoryDetail.conflictRollbackSuccess'), type: 'success' });
+      await loadMemoryData(memory.id);
+    } catch (e: any) {
+      setToast({ message: t('memoryDetail.conflictResolveFailed', { message: e.message }), type: 'error' });
+    } finally {
+      setRollingBackConflictReview(false);
+    }
+  };
 
   return (
     <div>
@@ -295,6 +586,36 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
           {memory.is_pinned ? <span className="badge" style={{ background: 'var(--color-warning-muted)', color: 'var(--color-warning)' }}>{t('memoryDetail.pinned')}</span> : null}
           {auditFlag === 'duplicate_preference' ? (
             <span className="badge" style={{ background: 'rgba(249,115,22,0.18)', color: '#c2410c' }}>{t('memoryDetail.duplicatePreference')}</span>
+          ) : timelineResolution?.role === 'current' ? (
+            <span className="badge" style={{ background: 'rgba(14,165,233,0.16)', color: '#0369a1' }}>
+              {t('memoryDetail.timelineCurrentConfirmed')}
+            </span>
+          ) : timelineResolution?.role === 'history' ? (
+            <span className="badge" style={{ background: 'rgba(148,163,184,0.18)', color: '#475569' }}>
+              {t('memoryDetail.timelineHistoryResolved')}
+            </span>
+          ) : conflictResolution?.role === 'winner' ? (
+            <span className="badge" style={{ background: 'rgba(244,114,182,0.18)', color: '#be185d' }}>
+              {t('memoryDetail.conflictWinnerConfirmed')}
+            </span>
+          ) : conflictResolution?.role === 'superseded' ? (
+            <span className="badge" style={{ background: 'rgba(148,163,184,0.18)', color: '#475569' }}>
+              {t('memoryDetail.conflictSuperseded')}
+            </span>
+          ) : auditFlag === 'possible_conflict' && auditKind === 'timeline_update_candidate' ? (
+            <span className="badge" style={{ background: 'rgba(14,165,233,0.16)', color: '#0369a1' }}>
+              {auditTimelineRole === 'current_candidate'
+                ? t('memoryDetail.timelineCurrentCandidate')
+                : t('memoryDetail.timelineHistoryCandidate')}
+            </span>
+          ) : auditFlag === 'possible_conflict' ? (
+            <span className="badge" style={{ background: 'rgba(244,114,182,0.18)', color: '#db2777' }}>
+              {conflictResolution?.role === 'winner'
+                ? t('memoryDetail.conflictWinnerConfirmed')
+                : conflictResolution?.role === 'superseded'
+                  ? t('memoryDetail.conflictSuperseded')
+                  : t('memoryDetail.conflictNeedsReview')}
+            </span>
           ) : null}
         </div>
 
@@ -402,30 +723,300 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
                 </td>
               </tr>
             )}
-            {auditFlag === 'duplicate_preference' && (
+            {(auditFlag === 'duplicate_preference' || duplicateResolution) && (
               <tr>
                 <td style={{ color: 'var(--color-text-secondary)', verticalAlign: 'top' }}>{t('memoryDetail.duplicatePreference')}</td>
                 <td>
-                  <div style={{ marginBottom: duplicatePreferenceIds.length > 0 ? 6 : 0 }}>{t('memoryDetail.duplicatePreferenceDesc')}</div>
-                  <button
-                    className="btn"
-                    style={{ fontSize: 12, marginBottom: 8 }}
-                    onClick={() => setShowDuplicateSuggestion(true)}
-                  >
-                    {t('memoryDetail.duplicateSuggestionButton')}
-                  </button>
-                  {duplicatePreferenceIds.length > 0 ? (
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                      {duplicatePreferenceIds.map((id: string) => (
+                  {duplicateResolution?.role === 'keeper' ? (
+                    <>
+                      <div style={{ marginBottom: 8 }}>
+                        {t('memoryDetail.duplicateResolutionKeeperDesc', {
+                          count: duplicateResolution.superseded_ids.length,
+                          resolvedAt: toLocal(duplicateResolution.resolved_at),
+                        })}
+                      </div>
+                      {duplicateResolution.superseded_ids.length > 0 ? (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                          {duplicateResolution.superseded_ids.map((id: string) => (
+                            <button
+                              key={id}
+                              className="btn"
+                              style={{ fontSize: 11, padding: '2px 8px' }}
+                              onClick={() => { loadMemoryData(id); window.scrollTo(0, 0); }}
+                            >
+                              {id}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      <button
+                        className="btn"
+                        style={{ fontSize: 12 }}
+                        disabled={rollingBackDuplicateResolution}
+                        onClick={handleRollbackDuplicateResolution}
+                      >
+                        {rollingBackDuplicateResolution
+                          ? (t('common.loading') || 'Loading...')
+                          : t('memoryDetail.duplicateRollbackButton')}
+                      </button>
+                    </>
+                  ) : duplicateResolution?.role === 'superseded' ? (
+                    <>
+                      <div style={{ marginBottom: 8 }}>
+                        {t('memoryDetail.duplicateResolutionSupersededDesc', {
+                          keeperId: duplicateResolution.keeper_id,
+                          resolvedAt: toLocal(duplicateResolution.resolved_at),
+                        })}
+                      </div>
+                      <button
+                        className="btn"
+                        style={{ fontSize: 12 }}
+                        onClick={() => { loadMemoryData(duplicateResolution.keeper_id); window.scrollTo(0, 0); }}
+                      >
+                        {t('memoryDetail.duplicateResolutionViewKeeper')}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ marginBottom: duplicatePreferenceIds.length > 0 ? 6 : 0 }}>{t('memoryDetail.duplicatePreferenceDesc')}</div>
+                      <button
+                        className="btn"
+                        style={{ fontSize: 12, marginBottom: 8 }}
+                        onClick={openDuplicateSuggestion}
+                      >
+                        {t('memoryDetail.duplicateSuggestionButton')}
+                      </button>
+                      {duplicatePreferenceIds.length > 0 ? (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {duplicatePreferenceIds.map((id: string) => (
+                            <button
+                              key={id}
+                              className="btn"
+                              style={{ fontSize: 11, padding: '2px 8px' }}
+                              onClick={() => { loadMemoryData(id); window.scrollTo(0, 0); }}
+                            >
+                              {id}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </td>
+              </tr>
+            )}
+            {(auditFlag === 'possible_conflict' || timelineResolution || conflictResolution) && (
+              <tr>
+                <td style={{ color: 'var(--color-text-secondary)', verticalAlign: 'top' }}>
+                  {timelineResolution
+                    ? t('memoryDetail.timelineUpdateCandidate')
+                    : conflictResolution
+                    ? t('memoryDetail.conflictNeedsReview')
+                    : auditKind === 'timeline_update_candidate'
+                    ? t('memoryDetail.timelineUpdateCandidate')
+                    : t('memoryDetail.conflictNeedsReview')}
+                </td>
+                <td>
+                  {timelineResolution?.role === 'current' ? (
+                    <>
+                      <div style={{ marginBottom: 8 }}>
+                        {t('memoryDetail.timelineCurrentResolvedDesc', {
+                          historyId: timelineResolution.history_id,
+                          resolvedAt: toLocal(timelineResolution.resolved_at),
+                        })}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
                         <button
-                          key={id}
                           className="btn"
                           style={{ fontSize: 11, padding: '2px 8px' }}
-                          onClick={() => { loadMemoryData(id); window.scrollTo(0, 0); }}
+                          onClick={() => { loadMemoryData(timelineResolution.history_id); window.scrollTo(0, 0); }}
                         >
-                          {id}
+                          {t('memoryDetail.timelineViewHistory')}
                         </button>
-                      ))}
+                      </div>
+                      <button
+                        className="btn"
+                        style={{ fontSize: 12 }}
+                        disabled={rollingBackTimelineUpdate}
+                        onClick={handleRollbackTimelineUpdate}
+                      >
+                        {rollingBackTimelineUpdate
+                          ? (t('common.loading') || 'Loading...')
+                          : t('memoryDetail.timelineRollbackButton')}
+                      </button>
+                    </>
+                  ) : timelineResolution?.role === 'history' ? (
+                    <>
+                      <div style={{ marginBottom: 8 }}>
+                        {t('memoryDetail.timelineHistoryResolvedDesc', {
+                          currentId: timelineResolution.current_id,
+                          resolvedAt: toLocal(timelineResolution.resolved_at),
+                        })}
+                      </div>
+                      <button
+                        className="btn"
+                        style={{ fontSize: 12 }}
+                        onClick={() => { loadMemoryData(timelineResolution.current_id); window.scrollTo(0, 0); }}
+                      >
+                        {t('memoryDetail.timelineViewCurrent')}
+                      </button>
+                    </>
+                  ) : auditKind === 'timeline_update_candidate' ? (
+                    <>
+                      <div style={{ marginBottom: 8 }}>
+                        {auditTimelineRole === 'current_candidate'
+                          ? t('memoryDetail.timelineCurrentDesc')
+                          : t('memoryDetail.timelineHistoryDesc')}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: auditDecisionReason ? 8 : 0 }}>
+                        {currentTimelineCandidateId ? (
+                          <button
+                            className="btn"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            onClick={() => { loadMemoryData(currentTimelineCandidateId); window.scrollTo(0, 0); }}
+                          >
+                            {t('memoryDetail.timelineViewCurrent')}
+                          </button>
+                        ) : null}
+                        {historyTimelineCandidateId ? (
+                          <button
+                            className="btn"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            onClick={() => { loadMemoryData(historyTimelineCandidateId); window.scrollTo(0, 0); }}
+                          >
+                            {t('memoryDetail.timelineViewHistory')}
+                          </button>
+                        ) : null}
+                      </div>
+                      {auditTimelineRole === 'current_candidate' ? (
+                        <button
+                          className="btn primary"
+                          style={{ fontSize: 12, marginBottom: auditDecisionReason ? 8 : 0 }}
+                          disabled={resolvingTimelineUpdate}
+                          onClick={handleResolveTimelineUpdate}
+                        >
+                          {resolvingTimelineUpdate
+                            ? (t('common.loading') || 'Loading...')
+                            : t('memoryDetail.timelineResolveButton')}
+                        </button>
+                      ) : null}
+                    </>
+                  ) : (
+                    <>
+                      {conflictResolution?.role === 'winner' ? (
+                        <>
+                          <div style={{ marginBottom: 8 }}>
+                            {t('memoryDetail.conflictWinnerResolvedDesc', {
+                              supersededId: conflictResolution.superseded_id,
+                              resolvedAt: toLocal(conflictResolution.resolved_at),
+                            })}
+                          </div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                            <button
+                              className="btn"
+                              style={{ fontSize: 11, padding: '2px 8px' }}
+                              onClick={() => { loadMemoryData(conflictResolution.superseded_id); window.scrollTo(0, 0); }}
+                            >
+                              {t('memoryDetail.conflictViewSuperseded')}
+                            </button>
+                          </div>
+                          <button
+                            className="btn"
+                            style={{ fontSize: 12 }}
+                            disabled={rollingBackConflictReview}
+                            onClick={handleRollbackConflictReview}
+                          >
+                            {rollingBackConflictReview
+                              ? (t('common.loading') || 'Loading...')
+                              : t('memoryDetail.conflictRollbackButton')}
+                          </button>
+                        </>
+                      ) : conflictResolution?.role === 'superseded' ? (
+                        <>
+                          <div style={{ marginBottom: 8 }}>
+                            {t('memoryDetail.conflictSupersededDesc', {
+                              winnerId: conflictResolution.winner_id,
+                              resolvedAt: toLocal(conflictResolution.resolved_at),
+                            })}
+                          </div>
+                          <button
+                            className="btn"
+                            style={{ fontSize: 12 }}
+                            onClick={() => { loadMemoryData(conflictResolution.winner_id); window.scrollTo(0, 0); }}
+                          >
+                            {t('memoryDetail.conflictViewWinner')}
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{ marginBottom: 8 }}>
+                            {t('memoryDetail.conflictNeedsReviewDesc')}
+                          </div>
+                          <div style={{
+                            marginBottom: 8,
+                            padding: 12,
+                            borderRadius: 'var(--radius-md)',
+                            background: 'var(--color-info-muted)',
+                            border: '1px solid var(--color-info-border)',
+                            fontSize: 13,
+                          }}>
+                            {t('memoryDetail.conflictResolveEffect')}
+                          </div>
+                          {loadingConflictPeers ? (
+                            <div className="empty">{t('common.loading')}</div>
+                          ) : primaryConflictPeer ? (
+                            <>
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                                <button
+                                  className="btn"
+                                  style={{ fontSize: 11, padding: '2px 8px' }}
+                                  onClick={() => { loadMemoryData(primaryConflictPeer.id); window.scrollTo(0, 0); }}
+                                >
+                                  {t('memoryDetail.conflictViewOther')}
+                                </button>
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                <button
+                                  className="btn primary"
+                                  style={{ fontSize: 12 }}
+                                  disabled={resolvingConflictReview}
+                                  onClick={() => handleResolveConflictReview(memory.id, primaryConflictPeer.id)}
+                                >
+                                  {resolvingConflictReview
+                                    ? (t('common.loading') || 'Loading...')
+                                    : t('memoryDetail.conflictKeepCurrentButton')}
+                                </button>
+                                <button
+                                  className="btn"
+                                  style={{ fontSize: 12 }}
+                                  disabled={resolvingConflictReview}
+                                  onClick={() => handleResolveConflictReview(primaryConflictPeer.id, memory.id)}
+                                >
+                                  {t('memoryDetail.conflictKeepOtherButton')}
+                                </button>
+                              </div>
+                            </>
+                          ) : conflictIds.length > 0 ? (
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {conflictIds.map((id: string) => (
+                                <button
+                                  key={id}
+                                  className="btn"
+                                  style={{ fontSize: 11, padding: '2px 8px' }}
+                                  onClick={() => { loadMemoryData(id); window.scrollTo(0, 0); }}
+                                >
+                                  {id}
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                        </>
+                      )}
+                    </>
+                  )}
+                  {userFacingAuditReason ? (
+                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                      {t('memoryDetail.timelineReason')}: {userFacingAuditReason}
                     </div>
                   ) : null}
                 </td>
@@ -618,6 +1209,21 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
             <div style={{ marginBottom: 12, color: 'var(--color-text-secondary)', fontSize: 13 }}>
               {t('memoryDetail.duplicateSuggestionDesc')}
             </div>
+            {selectedDuplicateKeeper && (
+              <div style={{
+                marginBottom: 12,
+                padding: 12,
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--color-info-muted)',
+                border: '1px solid var(--color-info-border)',
+                fontSize: 13,
+              }}>
+                {t('memoryDetail.duplicateResolveEffect', {
+                  keeperId: selectedDuplicateKeeper.id,
+                  count: selectedDuplicateSupersededCount,
+                })}
+              </div>
+            )}
             {recommendedDuplicateKeeper && (
               <div style={{
                 marginBottom: 12,
@@ -639,6 +1245,7 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
                 <table style={{ fontSize: 12 }}>
                   <thead>
                     <tr>
+                      <th>{t('memoryDetail.duplicateSuggestionRecommended')}</th>
                       <th>{t('memoryDetail.id')}</th>
                       <th>{t('memoryDetail.content')}</th>
                       <th>{t('memoryDetail.confidence')}</th>
@@ -649,7 +1256,23 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
                   </thead>
                   <tbody>
                     {sortedDuplicateCandidates.map((candidate) => (
-                      <tr key={candidate.id}>
+                      <tr
+                        key={candidate.id}
+                        onClick={() => setSelectedDuplicateKeeperId(candidate.id)}
+                        style={{
+                          cursor: 'pointer',
+                          background: selectedDuplicateKeeperId === candidate.id ? 'var(--color-primary-muted)' : undefined,
+                        }}
+                      >
+                        <td>
+                          <input
+                            type="radio"
+                            name="duplicate-keeper"
+                            checked={selectedDuplicateKeeperId === candidate.id}
+                            onChange={() => setSelectedDuplicateKeeperId(candidate.id)}
+                            style={{ width: 'auto' }}
+                          />
+                        </td>
                         <td style={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 11 }}>{candidate.id}</td>
                         <td style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{candidate.content}</td>
                         <td>{(candidate.confidence ?? 0).toFixed(2)}</td>
@@ -666,7 +1289,16 @@ export default function MemoryDetail({ memoryId, onBack }: { memoryId: string; o
                 </table>
               </div>
             )}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12, gap: 8 }}>
+              <button
+                className="btn primary"
+                disabled={!selectedDuplicateKeeperId || resolvingDuplicate || sortedDuplicateCandidates.length < 2}
+                onClick={handleResolveDuplicate}
+              >
+                {resolvingDuplicate
+                  ? (t('common.loading') || 'Loading...')
+                  : t('memoryDetail.duplicateResolveButton')}
+              </button>
               <button className="btn" onClick={() => setShowDuplicateSuggestion(false)}>{t('common.close')}</button>
             </div>
           </div>

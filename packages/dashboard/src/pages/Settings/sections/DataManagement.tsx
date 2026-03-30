@@ -1,5 +1,14 @@
 import React, { useState } from 'react';
-import { getConfig, updateConfig, exportFullConfig, triggerExport, triggerReindex } from '../../../api/client.js';
+import {
+  getConfig,
+  updateConfig,
+  exportFullConfig,
+  triggerExport,
+  triggerReindex,
+  seedDuplicatePreferenceDemo,
+  seedTimelineConflictDemo,
+  seedConflictReviewDemo,
+} from '../../../api/client.js';
 
 interface DataManagementProps {
   config: any;
@@ -30,6 +39,9 @@ export default function DataManagement({ config, setConfig, setToast, t }: DataM
   const [showConfig, setShowConfig] = useState(false);
   const [reindexing, setReindexing] = useState(false);
   const [reindexStart, setReindexStart] = useState<number | null>(null);
+  const [seedingDuplicateDemo, setSeedingDuplicateDemo] = useState(false);
+  const [seedingTimelineDemo, setSeedingTimelineDemo] = useState(false);
+  const [seedingConflictReviewDemo, setSeedingConflictReviewDemo] = useState(false);
 
   return (
     <>
@@ -91,6 +103,84 @@ export default function DataManagement({ config, setConfig, setToast, t }: DataM
             {!reindexing && (
               <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{t('settings.rebuildHint')}</span>
             )}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>{t('settings.devTools') || 'Dev Tools'}</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button className="btn" disabled={seedingDuplicateDemo} onClick={async () => {
+              try {
+                setSeedingDuplicateDemo(true);
+                const result = await seedDuplicatePreferenceDemo();
+                setToast({
+                  message: t('settings.toastSeedDuplicatePreferenceDemo', {
+                    agent: result.agent_id,
+                    count: result.duplicate_preference_ids?.length ?? 0,
+                  }),
+                  type: 'success',
+                });
+              } catch (e: any) {
+                setToast({ message: t('settings.toastSeedDuplicatePreferenceDemoFailed', { message: e.message }), type: 'error' });
+              } finally {
+                setSeedingDuplicateDemo(false);
+              }
+            }}>
+              {seedingDuplicateDemo ? (t('common.loading') || 'Loading...') : t('settings.seedDuplicatePreferenceDemo')}
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+              {t('settings.seedDuplicatePreferenceDemoHint')}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+            <button className="btn" disabled={seedingTimelineDemo} onClick={async () => {
+              try {
+                setSeedingTimelineDemo(true);
+                const result = await seedTimelineConflictDemo();
+                setToast({
+                  message: t('settings.toastSeedTimelineConflictDemo', {
+                    agent: result.agent_id,
+                    current: result.current_candidate_id,
+                    history: result.history_candidate_id,
+                  }),
+                  type: 'success',
+                });
+              } catch (e: any) {
+                setToast({ message: t('settings.toastSeedTimelineConflictDemoFailed', { message: e.message }), type: 'error' });
+              } finally {
+                setSeedingTimelineDemo(false);
+              }
+            }}>
+              {seedingTimelineDemo ? (t('common.loading') || 'Loading...') : t('settings.seedTimelineConflictDemo')}
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+              {t('settings.seedTimelineConflictDemoHint')}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+            <button className="btn" disabled={seedingConflictReviewDemo} onClick={async () => {
+              try {
+                setSeedingConflictReviewDemo(true);
+                const result = await seedConflictReviewDemo();
+                setToast({
+                  message: t('settings.toastSeedConflictReviewDemo', {
+                    agent: result.agent_id,
+                    left: result.review_memory_ids?.[0] || '',
+                    right: result.review_memory_ids?.[1] || '',
+                  }),
+                  type: 'success',
+                });
+              } catch (e: any) {
+                setToast({ message: t('settings.toastSeedConflictReviewDemoFailed', { message: e.message }), type: 'error' });
+              } finally {
+                setSeedingConflictReviewDemo(false);
+              }
+            }}>
+              {seedingConflictReviewDemo ? (t('common.loading') || 'Loading...') : t('settings.seedConflictReviewDemo')}
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+              {t('settings.seedConflictReviewDemoHint')}
+            </span>
           </div>
         </div>
       </div>

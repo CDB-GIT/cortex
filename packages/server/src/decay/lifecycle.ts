@@ -129,9 +129,20 @@ export interface LifecyclePreferenceStats {
   missingSourceRecent: number;
   duplicateGroups: number;
   duplicatePreferences: number;
+  duplicatePreferencesPending: number;
+  duplicatePreferencesResolved: number;
+  duplicatePreferenceSuperseded: number;
   averageSourceMemories: number;
   recentItems: LifecyclePreferenceRecentItem[];
   duplicateSamples: LifecyclePreferenceDuplicateSample[];
+}
+
+export interface LifecycleContradictionStats {
+  enabled: boolean;
+  timelineCandidatePairs: number;
+  timelineResolvedPairs: number;
+  conflictNeedsReviewPairs: number;
+  conflictResolvedPairs: number;
 }
 
 export interface LifecycleStatsSnapshot {
@@ -152,6 +163,7 @@ export interface LifecycleStatsSnapshot {
   lowConfidenceCount: number;
   categoryStats: LifecycleCategoryStat[];
   preferenceExtraction: LifecyclePreferenceStats;
+  contradictionAudit: LifecycleContradictionStats;
   analysis: LifecycleAnalysis;
 }
 
@@ -610,6 +622,7 @@ export class LifecycleEngine {
         maxDecayScore: Number((row.maxDecayScore ?? 0).toFixed(3)),
       })),
       preferenceExtraction: this.buildPreferenceExtractionStats(agentId),
+      contradictionAudit: this.buildContradictionAuditStats(agentId),
       analysis: this.buildLifecycleAnalysis(
         activeMemories,
         this.config.lifecycle.archiveThreshold,
@@ -798,20 +811,43 @@ export class LifecycleEngine {
     return dot / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 
-  private mergeAuditMetadata(existing: Memory, counterpartId: string, decision: string, reason: string): string {
+  private mergeAuditMetadata(
+    existing: Memory,
+    counterpartId: string,
+    decision: string,
+    reason: string,
+    timeline?: { currentId: string; historyId: string },
+  ): string {
     const meta = this.parseMetadata(existing.metadata);
     const currentConflicts = Array.isArray(meta.audit_conflict_with) ? meta.audit_conflict_with : [];
     const mergedConflicts = Array.from(new Set([...currentConflicts, counterpartId]));
-    return JSON.stringify({
+    const nextMeta: Record<string, any> = {
       ...meta,
       audit_flag: 'possible_conflict',
       audit_reason: 'contradiction_llm',
+      audit_kind: timeline ? 'timeline_update_candidate' : 'conflict_needs_review',
       audit_conflict_with: mergedConflicts,
       audit_decision: decision,
       audit_decision_reason: reason,
       audit_at: new Date().toISOString(),
       audit_version: 1,
-    });
+    };
+
+    if (timeline) {
+      nextMeta.audit_current_candidate_id = timeline.currentId;
+      nextMeta.audit_history_candidate_id = timeline.historyId;
+      nextMeta.audit_timeline_role = existing.id === timeline.currentId
+        ? 'current_candidate'
+        : existing.id === timeline.historyId
+          ? 'history_candidate'
+          : undefined;
+    } else {
+      delete nextMeta.audit_current_candidate_id;
+      delete nextMeta.audit_history_candidate_id;
+      delete nextMeta.audit_timeline_role;
+    }
+
+    return JSON.stringify(nextMeta);
   }
 
   private mergePreferenceDuplicateMetadata(existing: Memory, duplicateIds: string[]): string {
@@ -964,14 +1000,22 @@ Return JSON only:
           llmCalls++;
           if (decision.action === 'both_valid') continue;
 
-          const candidateMeta = this.mergeAuditMetadata(candidate, counterpart.id, decision.action, decision.reason);
-          const counterpartMeta = this.mergeAuditMetadata(counterpart, candidate.id, decision.action, decision.reason);
+          const timeline = decision.action === 'keep_a'
+            ? { currentId: candidate.id, historyId: counterpart.id }
+            : decision.action === 'keep_b'
+              ? { currentId: counterpart.id, historyId: candidate.id }
+              : undefined;
+          const candidateMeta = this.mergeAuditMetadata(candidate, counterpart.id, decision.action, decision.reason, timeline);
+          const counterpartMeta = this.mergeAuditMetadata(counterpart, candidate.id, decision.action, decision.reason, timeline);
           updateMemory(candidate.id, { metadata: candidateMeta });
           updateMemory(counterpart.id, { metadata: counterpartMeta });
           insertLifecycleLog('contradiction_audit_flagged', [candidate.id, counterpart.id], {
             agent_id: agentId || candidate.agent_id,
             decision: decision.action,
             reason: decision.reason,
+            audit_kind: timeline ? 'timeline_update_candidate' : 'conflict_needs_review',
+            current_candidate_id: timeline?.currentId,
+            history_candidate_id: timeline?.historyId,
             similarity: Number(similarity.toFixed(3)),
             mode: auditConfig.mode,
           });
@@ -985,7 +1029,9 @@ Return JSON only:
               importance: candidate.importance,
               action: 'audit',
               score: similarity,
-              reason: `possible_conflict:${decision.action}`,
+              reason: timeline
+                ? `timeline_update_candidate:${decision.action}`
+                : `possible_conflict:${decision.action}`,
             });
           }
         }
@@ -1049,6 +1095,32 @@ Return JSON only:
       WHERE layer = 'core'
         AND category = 'preference'
         AND superseded_by IS NULL${agentFilter}
+    `).get(...params) as { count: number }).count;
+
+    const duplicatePreferencesPending = (db.prepare(`
+      SELECT COUNT(*) as count
+      FROM memories
+      WHERE layer = 'core'
+        AND category = 'preference'
+        AND superseded_by IS NULL
+        AND json_extract(metadata, '$.audit_flag') = 'duplicate_preference'${agentFilter}
+    `).get(...params) as { count: number }).count;
+
+    const duplicatePreferencesResolved = (db.prepare(`
+      SELECT COUNT(*) as count
+      FROM memories
+      WHERE layer = 'core'
+        AND category = 'preference'
+        AND superseded_by IS NULL
+        AND json_extract(metadata, '$.duplicate_resolution.role') = 'keeper'${agentFilter}
+    `).get(...params) as { count: number }).count;
+
+    const duplicatePreferenceSuperseded = (db.prepare(`
+      SELECT COUNT(*) as count
+      FROM memories
+      WHERE category = 'preference'
+        AND superseded_by IS NOT NULL
+        AND json_extract(metadata, '$.duplicate_resolution.role') = 'superseded'${agentFilter}
     `).get(...params) as { count: number }).count;
 
     const lifecycleExtracted = db.prepare(`
@@ -1129,6 +1201,9 @@ Return JSON only:
       missingSourceRecent,
       duplicateGroups: duplicateGroups.length,
       duplicatePreferences: duplicateGroups.reduce((sum, group) => sum + group.length, 0),
+      duplicatePreferencesPending,
+      duplicatePreferencesResolved,
+      duplicatePreferenceSuperseded,
       averageSourceMemories,
       recentItems,
       duplicateSamples: duplicateGroups.slice(0, 5).map((group) => ({
@@ -1136,6 +1211,67 @@ Return JSON only:
         count: group.length,
         memoryIds: group.map((memory) => memory.id),
       })),
+    };
+  }
+
+  private buildContradictionAuditStats(agentId?: string): LifecycleContradictionStats {
+    const db = getDb();
+    const agentFilter = agentId ? ' AND agent_id = ?' : '';
+    const params = agentId ? [agentId] : [];
+
+    const unresolvedRows = db.prepare(`
+      SELECT id, superseded_by, metadata
+      FROM memories
+      WHERE json_extract(metadata, '$.audit_flag') = 'possible_conflict'
+        AND superseded_by IS NULL${agentFilter}
+    `).all(...params) as Array<Pick<Memory, 'id' | 'superseded_by' | 'metadata'>>;
+
+    const timelinePairs = new Set<string>();
+    const reviewPairs = new Set<string>();
+
+    for (const row of unresolvedRows) {
+      const meta = this.parseMetadata(row.metadata);
+      if (meta.audit_kind === 'timeline_update_candidate') {
+        const currentId = typeof meta.audit_current_candidate_id === 'string' ? meta.audit_current_candidate_id : '';
+        const historyId = typeof meta.audit_history_candidate_id === 'string' ? meta.audit_history_candidate_id : '';
+        if (currentId && historyId && currentId !== historyId) {
+          timelinePairs.add(`${currentId}::${historyId}`);
+        }
+        continue;
+      }
+
+      if (meta.audit_kind === 'conflict_needs_review') {
+        const peers = Array.isArray(meta.audit_conflict_with)
+          ? meta.audit_conflict_with.filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0)
+          : [];
+        for (const peerId of peers) {
+          if (peerId === row.id) continue;
+          const pair = [row.id, peerId].sort().join('::');
+          reviewPairs.add(pair);
+        }
+      }
+    }
+
+    const timelineResolvedPairs = (db.prepare(`
+      SELECT COUNT(DISTINCT json_extract(metadata, '$.timeline_resolution.resolution_id')) as count
+      FROM memories
+      WHERE superseded_by IS NULL
+        AND json_extract(metadata, '$.timeline_resolution.role') = 'current'${agentFilter}
+    `).get(...params) as { count: number | null }).count ?? 0;
+
+    const conflictResolvedPairs = (db.prepare(`
+      SELECT COUNT(DISTINCT json_extract(metadata, '$.conflict_resolution.resolution_id')) as count
+      FROM memories
+      WHERE superseded_by IS NULL
+        AND json_extract(metadata, '$.conflict_resolution.role') = 'winner'${agentFilter}
+    `).get(...params) as { count: number | null }).count ?? 0;
+
+    return {
+      enabled: !!this.config.lifecycle.contradictionAudit?.enabled,
+      timelineCandidatePairs: timelinePairs.size,
+      timelineResolvedPairs: Number(timelineResolvedPairs),
+      conflictNeedsReviewPairs: reviewPairs.size,
+      conflictResolvedPairs: Number(conflictResolvedPairs),
     };
   }
 

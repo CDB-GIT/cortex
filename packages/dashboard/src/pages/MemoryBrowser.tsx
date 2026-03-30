@@ -16,11 +16,47 @@ interface Memory {
   decay_score: number;
   access_count: number;
   created_at: string;
+  updated_at: string;
   agent_id: string;
   source: string | null;
   superseded_by: string | null;
   metadata?: string | null;
   is_pinned?: number;
+}
+
+interface DuplicateResolutionMeta {
+  resolution_id: string;
+  resolution_type: 'manual_keep_one_supersede_others';
+  role: 'keeper' | 'superseded';
+  keeper_id: string;
+  duplicate_group_ids: string[];
+  superseded_ids: string[];
+  resolved_at: string;
+}
+
+interface ConflictAuditMeta {
+  audit_kind?: 'timeline_update_candidate' | 'conflict_needs_review';
+  audit_timeline_role?: 'current_candidate' | 'history_candidate';
+  audit_current_candidate_id?: string;
+  audit_history_candidate_id?: string;
+}
+
+interface TimelineResolutionMeta {
+  resolution_id: string;
+  resolution_type: 'manual_timeline_confirm_current';
+  role: 'current' | 'history';
+  current_id: string;
+  history_id: string;
+  resolved_at: string;
+}
+
+interface ConflictResolutionMeta {
+  resolution_id: string;
+  resolution_type: 'manual_conflict_confirm_winner';
+  role: 'winner' | 'superseded';
+  winner_id: string;
+  superseded_id: string;
+  resolved_at: string;
 }
 
 type SortField = 'created_at' | 'importance' | 'decay_score' | 'access_count' | 'confidence';
@@ -301,13 +337,170 @@ export default function MemoryBrowser() {
     return field;
   };
 
-  const getAuditFlag = (memory: Memory): string | null => {
+  const parseMeta = (memory: Memory): Record<string, any> | null => {
     try {
-      const meta = memory.metadata ? JSON.parse(memory.metadata) : {};
-      return typeof meta.audit_flag === 'string' ? meta.audit_flag : null;
+      return memory.metadata ? JSON.parse(memory.metadata) : null;
     } catch {
       return null;
     }
+  };
+
+  const getAuditFlag = (memory: Memory): string | null => {
+    const meta = parseMeta(memory);
+    return typeof meta?.audit_flag === 'string' ? meta.audit_flag : null;
+  };
+
+  const getDuplicateResolution = (memory: Memory): DuplicateResolutionMeta | null => {
+    const meta = parseMeta(memory);
+    const candidate = meta?.duplicate_resolution;
+    if (!candidate || typeof candidate !== 'object') return null;
+    if (candidate.role !== 'keeper' && candidate.role !== 'superseded') return null;
+    if (typeof candidate.keeper_id !== 'string' || typeof candidate.resolution_id !== 'string') return null;
+    return {
+      resolution_id: candidate.resolution_id,
+      resolution_type: 'manual_keep_one_supersede_others',
+      role: candidate.role,
+      keeper_id: candidate.keeper_id,
+      duplicate_group_ids: Array.isArray(candidate.duplicate_group_ids) ? candidate.duplicate_group_ids.filter((id: unknown): id is string => typeof id === 'string') : [],
+      superseded_ids: Array.isArray(candidate.superseded_ids) ? candidate.superseded_ids.filter((id: unknown): id is string => typeof id === 'string') : [],
+      resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : memory.updated_at,
+    };
+  };
+
+  const getConflictAuditMeta = (memory: Memory): ConflictAuditMeta | null => {
+    const meta = parseMeta(memory);
+    if (!meta || meta.audit_flag !== 'possible_conflict') return null;
+    return meta as ConflictAuditMeta;
+  };
+
+  const getTimelineResolution = (memory: Memory): TimelineResolutionMeta | null => {
+    const meta = parseMeta(memory);
+    const candidate = meta?.timeline_resolution;
+    if (!candidate || typeof candidate !== 'object') return null;
+    if (candidate.role !== 'current' && candidate.role !== 'history') return null;
+    if (typeof candidate.resolution_id !== 'string' || typeof candidate.current_id !== 'string' || typeof candidate.history_id !== 'string') return null;
+    return {
+      resolution_id: candidate.resolution_id,
+      resolution_type: 'manual_timeline_confirm_current',
+      role: candidate.role,
+      current_id: candidate.current_id,
+      history_id: candidate.history_id,
+      resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : memory.updated_at,
+    };
+  };
+
+  const getConflictResolution = (memory: Memory): ConflictResolutionMeta | null => {
+    const meta = parseMeta(memory);
+    const candidate = meta?.conflict_resolution;
+    if (!candidate || typeof candidate !== 'object') return null;
+    if (candidate.role !== 'winner' && candidate.role !== 'superseded') return null;
+    if (typeof candidate.resolution_id !== 'string' || typeof candidate.winner_id !== 'string' || typeof candidate.superseded_id !== 'string') return null;
+    return {
+      resolution_id: candidate.resolution_id,
+      resolution_type: 'manual_conflict_confirm_winner',
+      role: candidate.role,
+      winner_id: candidate.winner_id,
+      superseded_id: candidate.superseded_id,
+      resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : memory.updated_at,
+    };
+  };
+
+  const getDuplicateResolutionState = (memory: Memory): 'pending' | 'keeper' | 'superseded' | null => {
+    const resolution = getDuplicateResolution(memory);
+    if (resolution?.role === 'keeper') return 'keeper';
+    if (resolution?.role === 'superseded') return 'superseded';
+    if (getAuditFlag(memory) === 'duplicate_preference') return 'pending';
+    return null;
+  };
+
+  const getConflictState = (memory: Memory): 'timeline_current' | 'timeline_history' | 'timeline_current_resolved' | 'timeline_history_resolved' | 'needs_review' | null => {
+    const conflictResolution = getConflictResolution(memory);
+    if (conflictResolution?.role === 'winner') return 'timeline_current_resolved';
+    if (conflictResolution?.role === 'superseded') return 'timeline_history_resolved';
+    const resolution = getTimelineResolution(memory);
+    if (resolution?.role === 'current') return 'timeline_current_resolved';
+    if (resolution?.role === 'history') return 'timeline_history_resolved';
+    const conflictMeta = getConflictAuditMeta(memory);
+    if (!conflictMeta) return null;
+    if (conflictMeta.audit_kind === 'timeline_update_candidate') {
+      return conflictMeta.audit_timeline_role === 'current_candidate'
+        ? 'timeline_current'
+        : 'timeline_history';
+    }
+    return 'needs_review';
+  };
+
+  const getDuplicateResolutionLabel = (state: 'pending' | 'keeper' | 'superseded' | null): string | null => {
+    if (state === 'pending') return t('memories.duplicatePending');
+    if (state === 'keeper') return t('memories.duplicateKeeper');
+    if (state === 'superseded') return t('memories.duplicateSuperseded');
+    return null;
+  };
+
+  const getConflictLabel = (state: 'timeline_current' | 'timeline_history' | 'timeline_current_resolved' | 'timeline_history_resolved' | 'needs_review' | null): string | null => {
+    const resolutionAwareState = state;
+    if (state === 'timeline_current') return t('memories.timelineCurrentCandidate');
+    if (state === 'timeline_history') return t('memories.timelineHistoryCandidate');
+    if (resolutionAwareState === 'timeline_current_resolved') return t('memories.conflictWinnerConfirmed');
+    if (resolutionAwareState === 'timeline_history_resolved') return t('memories.conflictSuperseded');
+    if (state === 'needs_review') return t('memories.conflictNeedsReview');
+    return null;
+  };
+
+  const getDuplicateResolutionHint = (memory: Memory): string | null => {
+    const state = getDuplicateResolutionState(memory);
+    const resolution = getDuplicateResolution(memory);
+    if (state === 'pending') {
+      return t('memories.duplicatePendingHint');
+    }
+    if (state === 'keeper') {
+      return t('memories.duplicateKeeperHint', {
+        count: resolution?.superseded_ids.length ?? 0,
+      });
+    }
+    if (state === 'superseded') {
+      return t('memories.duplicateSupersededHint', {
+        keeperId: resolution?.keeper_id || memory.superseded_by || '',
+      });
+    }
+    return null;
+  };
+
+  const getConflictHint = (memory: Memory): string | null => {
+    const state = getConflictState(memory);
+    const meta = getConflictAuditMeta(memory);
+    const resolution = getTimelineResolution(memory);
+    const conflictResolution = getConflictResolution(memory);
+    if (state === 'timeline_current') {
+      return t('memories.timelineCurrentHint');
+    }
+    if (state === 'timeline_history') {
+      return t('memories.timelineHistoryHint', {
+        currentId: meta?.audit_current_candidate_id || '',
+      });
+    }
+    if (state === 'timeline_current_resolved') {
+      return conflictResolution?.role === 'winner'
+        ? t('memories.conflictWinnerResolvedHint', {
+          supersededId: conflictResolution.superseded_id || '',
+        })
+        : t('memories.timelineCurrentResolvedHint', {
+          historyId: resolution?.history_id || '',
+        });
+    }
+    if (state === 'timeline_history_resolved') {
+      return conflictResolution?.role === 'superseded'
+        ? t('memories.conflictSupersededResolvedHint', {
+          winnerId: conflictResolution.winner_id || '',
+        })
+        : t('memories.timelineHistoryResolvedHint', {
+          currentId: resolution?.current_id || '',
+        });
+    }
+    if (state === 'needs_review') {
+      return t('memories.conflictNeedsReviewHint');
+    }
+    return null;
   };
 
   return (
@@ -449,6 +642,10 @@ export default function MemoryBrowser() {
             <div key={m.id} className="memory-card" data-layer={m.layer} style={{ borderColor: selected.has(m.id) ? 'var(--color-primary)' : undefined }}>
               {(() => {
                 const auditFlag = getAuditFlag(m);
+                const duplicateState = getDuplicateResolutionState(m);
+                const duplicateLabel = getDuplicateResolutionLabel(duplicateState);
+                const conflictState = getConflictState(m);
+                const conflictLabel = getConflictLabel(conflictState);
                 return (
               <div className="header">
                 <input
@@ -460,14 +657,39 @@ export default function MemoryBrowser() {
                 <span className={`badge ${m.layer}`}>{m.layer}</span>
                 <span className="badge" style={{ background: 'var(--color-info-muted)', color: '#60a5fa' }}>{m.category}</span>
                 {m.is_pinned ? <span className="badge" style={{ background: 'rgba(255,170,0,0.2)', color: '#b8860b' }}>{t('memoryDetail.pinned')}</span> : null}
-                {auditFlag === 'possible_conflict' ? (
-                  <span className="badge" style={{ background: 'rgba(244,114,182,0.18)', color: '#db2777' }}>
-                    {t('memories.auditPossibleConflict') || '可能冲突'}
-                  </span>
+                {auditFlag === 'possible_conflict' || conflictState === 'timeline_current_resolved' || conflictState === 'timeline_history_resolved' ? (
+                  conflictState === 'timeline_current' || conflictState === 'timeline_current_resolved' ? (
+                    <span className="badge" style={{ background: 'rgba(14,165,233,0.16)', color: '#0369a1' }}>
+                      {conflictLabel}
+                    </span>
+                  ) : conflictState === 'timeline_history' || conflictState === 'timeline_history_resolved' ? (
+                    <span className="badge" style={{ background: 'rgba(148,163,184,0.18)', color: '#475569' }}>
+                      {conflictLabel}
+                    </span>
+                  ) : (
+                    <span className="badge" style={{ background: 'rgba(244,114,182,0.18)', color: '#db2777' }}>
+                      {conflictLabel || t('memories.auditPossibleConflict') || '可能冲突'}
+                    </span>
+                  )
                 ) : null}
-                {auditFlag === 'duplicate_preference' ? (
+                {auditFlag === 'duplicate_preference' && duplicateState === null ? (
                   <span className="badge" style={{ background: 'rgba(249,115,22,0.18)', color: '#c2410c' }}>
                     {t('memories.auditDuplicatePreference') || '重复偏好'}
+                  </span>
+                ) : null}
+                {duplicateState === 'keeper' ? (
+                  <span className="badge" style={{ background: 'rgba(34,197,94,0.16)', color: '#15803d' }}>
+                    {duplicateLabel}
+                  </span>
+                ) : null}
+                {duplicateState === 'superseded' ? (
+                  <span className="badge" style={{ background: 'rgba(100,116,139,0.16)', color: '#475569' }}>
+                    {duplicateLabel}
+                  </span>
+                ) : null}
+                {duplicateState === 'pending' ? (
+                  <span className="badge" style={{ background: 'rgba(249,115,22,0.18)', color: '#c2410c' }}>
+                    {duplicateLabel}
                   </span>
                 ) : null}
                 {isSearchMode && scoreMap[m.id] !== undefined && (
@@ -480,6 +702,23 @@ export default function MemoryBrowser() {
                 );
               })()}
               <div className="content">{m.content}</div>
+              {(() => {
+                const hint = getDuplicateResolutionHint(m) || getConflictHint(m);
+                if (!hint) return null;
+                return (
+                  <div style={{
+                    marginTop: 8,
+                    marginBottom: 6,
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    background: 'var(--color-base)',
+                    color: 'var(--color-text-secondary)',
+                    fontSize: 12,
+                  }}>
+                    {hint}
+                  </div>
+                );
+              })()}
               <div className="meta">
                 <span>{t('memories.imp')}: {m.importance?.toFixed(2)}</span>
                 <span>{t('memories.decay')}: {m.decay_score?.toFixed(2)}</span>

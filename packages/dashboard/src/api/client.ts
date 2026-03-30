@@ -80,6 +80,18 @@ export const getMemory = (id: string) => request(`/memories/${id}`);
 export const getMemoryChain = (id: string) => request(`/memories/${id}/chain`);
 export const rollbackMemory = (id: string, targetId: string) =>
   request(`/memories/${id}/rollback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_id: targetId }) });
+export const resolveDuplicatePreference = (id: string, data: { keeper_id: string; memory_ids: string[] }) =>
+  request(`/memories/${id}/duplicate-preference/resolve`, { method: 'POST', body: JSON.stringify(data) });
+export const rollbackDuplicatePreferenceResolution = (id: string, data?: { resolution_id?: string }) =>
+  request(`/memories/${id}/duplicate-preference/rollback`, { method: 'POST', body: JSON.stringify(data || {}) });
+export const resolveTimelineUpdate = (id: string, data: { current_id: string; history_id: string }) =>
+  request(`/memories/${id}/timeline-update/resolve`, { method: 'POST', body: JSON.stringify(data) });
+export const rollbackTimelineUpdateResolution = (id: string, data?: { resolution_id?: string }) =>
+  request(`/memories/${id}/timeline-update/rollback`, { method: 'POST', body: JSON.stringify(data || {}) });
+export const resolveConflictReview = (id: string, data: { winner_id: string; superseded_id: string }) =>
+  request(`/memories/${id}/conflict-review/resolve`, { method: 'POST', body: JSON.stringify(data) });
+export const rollbackConflictReviewResolution = (id: string, data?: { resolution_id?: string }) =>
+  request(`/memories/${id}/conflict-review/rollback`, { method: 'POST', body: JSON.stringify(data || {}) });
 
 export const createMemory = (data: any) =>
   request('/memories', { method: 'POST', body: JSON.stringify(data) });
@@ -160,6 +172,12 @@ export const triggerImport = (data: any) =>
 // Reindex
 export const triggerReindex = () =>
   request('/reindex', { method: 'POST', body: '{}' });
+export const seedDuplicatePreferenceDemo = () =>
+  request('/system/seed-duplicate-preference-demo', { method: 'POST', body: '{}' });
+export const seedTimelineConflictDemo = () =>
+  request('/system/seed-timeline-conflict-demo', { method: 'POST', body: '{}' });
+export const seedConflictReviewDemo = () =>
+  request('/system/seed-conflict-review-demo', { method: 'POST', body: '{}' });
 
 // Self-update
 export const triggerUpdate = () =>

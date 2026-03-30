@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { getStats, getDb } from '../db/index.js';
+import { getStats, getDb, insertMemory, updateMemory, ensureAgent } from '../db/index.js';
 import { getConfig, getConfigFilePath, updateConfig } from '../utils/config.js';
 import { restartLifecycleScheduler } from '../core/scheduler.js';
 import { createLogger, getLogLevel as _getLogLevel, setLogLevel as _setLogLevel, getLogBuffer } from '../utils/logger.js';
@@ -9,6 +9,7 @@ import type { Memory } from '../db/queries.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { generateId } from '../utils/helpers.js';
 
 const log = createLogger('system');
 
@@ -565,5 +566,299 @@ export function registerSystemRoutes(app: FastifyInstance, cortex: CortexApp): v
     }
 
     return { ok: true, total: memories.length, indexed, errors, ghosts_cleaned: ghostsCleaned };
+  });
+
+  // Dev helper: create duplicate preference demo data for manual resolution testing.
+  app.post('/api/v1/system/seed-duplicate-preference-demo', async (req, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      reply.code(403);
+      return { error: 'Demo seed endpoint is disabled in production' };
+    }
+
+    const agentId = 'demo-duplicate-resolution';
+    ensureAgent(agentId);
+
+    const sourceFacts = [
+      insertMemory({
+        layer: 'core',
+        category: 'fact',
+        content: 'User repeatedly asked for async updates instead of live calls.',
+        agent_id: agentId,
+        confidence: 0.88,
+        importance: 0.72,
+        decay_score: 0.92,
+        source: 'demo:duplicate-preference-seed',
+      }),
+      insertMemory({
+        layer: 'core',
+        category: 'decision',
+        content: 'Decision: switch status reporting to batched async notes.',
+        agent_id: agentId,
+        confidence: 0.91,
+        importance: 0.8,
+        decay_score: 0.94,
+        source: 'demo:duplicate-preference-seed',
+      }),
+      insertMemory({
+        layer: 'core',
+        category: 'insight',
+        content: 'User responds better when interruptions are grouped into one async summary.',
+        agent_id: agentId,
+        confidence: 0.83,
+        importance: 0.74,
+        decay_score: 0.9,
+        source: 'demo:duplicate-preference-seed',
+      }),
+    ];
+
+    const duplicateIds = [generateId(), generateId(), generateId()];
+    const duplicateRows = [
+      {
+        id: duplicateIds[0]!,
+        content: 'User prefers async updates.',
+        confidence: 0.79,
+        importance: 0.74,
+        source_memories: [sourceFacts[0]!.id],
+        is_pinned: 0,
+      },
+      {
+        id: duplicateIds[1]!,
+        content: 'User prefers async updates!',
+        confidence: 0.92,
+        importance: 0.78,
+        source_memories: [sourceFacts[0]!.id, sourceFacts[1]!.id],
+        is_pinned: 1,
+      },
+      {
+        id: duplicateIds[2]!,
+        content: 'User prefers async updates。',
+        confidence: 0.81,
+        importance: 0.73,
+        source_memories: [sourceFacts[2]!.id],
+        is_pinned: 0,
+      },
+    ];
+
+    const createdPreferences = duplicateRows.map((row) => insertMemory({
+      id: row.id,
+      layer: 'core',
+      category: 'preference',
+      content: row.content,
+      agent_id: agentId,
+      confidence: row.confidence,
+      importance: row.importance,
+      decay_score: 0.95,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        source_memories: row.source_memories,
+        extraction_type: 'preference_extraction',
+        audit_flag: 'duplicate_preference',
+        audit_reason: 'preference_duplicate_exact',
+        preference_duplicate_with: duplicateIds.filter((id) => id !== row.id),
+        preference_duplicate_count: duplicateIds.length,
+        preference_duplicate_audit_at: new Date().toISOString(),
+        preference_duplicate_audit_version: 1,
+        demo_seed: 'duplicate_preference_resolution',
+      }),
+    }));
+
+    for (let i = 0; i < createdPreferences.length; i++) {
+      if (duplicateRows[i]!.is_pinned) {
+        getDb().prepare('UPDATE memories SET is_pinned = 1 WHERE id = ?').run(createdPreferences[i]!.id);
+      }
+    }
+
+    try {
+      const allCreated = [...sourceFacts, ...createdPreferences];
+      for (const memory of allCreated) {
+        const embedding = await cortex.embeddingProvider.embed(memory.content);
+        if (embedding.length > 0) {
+          await cortex.vectorBackend.upsert(memory.id, embedding);
+        }
+      }
+    } catch (e: any) {
+      log.warn({ error: e.message }, 'Duplicate preference demo seed created without full vector indexing');
+    }
+
+    return {
+      ok: true,
+      agent_id: agentId,
+      source_memory_ids: sourceFacts.map((memory) => memory.id),
+      duplicate_preference_ids: createdPreferences.map((memory) => memory.id),
+      recommended_keeper_id: createdPreferences[1]!.id,
+    };
+  });
+
+  // Dev helper: create a timeline-update conflict demo pair for manual confirmation testing.
+  app.post('/api/v1/system/seed-timeline-conflict-demo', async (req, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      reply.code(403);
+      return { error: 'Demo seed endpoint is disabled in production' };
+    }
+
+    const agentId = 'demo-timeline-conflict';
+    ensureAgent(agentId);
+
+    const older = insertMemory({
+      layer: 'core',
+      category: 'fact',
+      content: 'User lives in Tokyo.',
+      agent_id: agentId,
+      confidence: 0.88,
+      importance: 0.76,
+      decay_score: 0.94,
+      source: 'demo:timeline-conflict-seed',
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_reason: 'contradiction_llm',
+        audit_kind: 'timeline_update_candidate',
+        audit_conflict_with: [],
+        audit_decision: 'keep_b',
+        audit_decision_reason: 'newer memory reflects the latest state after a move',
+      }),
+    });
+    const newer = insertMemory({
+      layer: 'core',
+      category: 'fact',
+      content: 'User moved to Osaka recently.',
+      agent_id: agentId,
+      confidence: 0.84,
+      importance: 0.8,
+      decay_score: 0.95,
+      source: 'demo:timeline-conflict-seed',
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_reason: 'contradiction_llm',
+        audit_kind: 'timeline_update_candidate',
+        audit_conflict_with: [],
+        audit_decision: 'keep_b',
+        audit_decision_reason: 'newer memory reflects the latest state after a move',
+      }),
+    });
+
+    const olderMeta = JSON.stringify({
+      audit_flag: 'possible_conflict',
+      audit_reason: 'contradiction_llm',
+      audit_kind: 'timeline_update_candidate',
+      audit_conflict_with: [newer.id],
+      audit_decision: 'keep_b',
+      audit_decision_reason: 'newer memory reflects the latest state after a move',
+      audit_at: new Date().toISOString(),
+      audit_version: 1,
+      audit_current_candidate_id: newer.id,
+      audit_history_candidate_id: older.id,
+      audit_timeline_role: 'history_candidate',
+      demo_seed: 'timeline_update_candidate',
+    });
+    const newerMeta = JSON.stringify({
+      audit_flag: 'possible_conflict',
+      audit_reason: 'contradiction_llm',
+      audit_kind: 'timeline_update_candidate',
+      audit_conflict_with: [older.id],
+      audit_decision: 'keep_b',
+      audit_decision_reason: 'newer memory reflects the latest state after a move',
+      audit_at: new Date().toISOString(),
+      audit_version: 1,
+      audit_current_candidate_id: newer.id,
+      audit_history_candidate_id: older.id,
+      audit_timeline_role: 'current_candidate',
+      demo_seed: 'timeline_update_candidate',
+    });
+    updateMemory(older.id, { metadata: olderMeta });
+    updateMemory(newer.id, { metadata: newerMeta });
+
+    try {
+      for (const memory of [older, newer]) {
+        const embedding = await cortex.embeddingProvider.embed(memory.content);
+        if (embedding.length > 0) {
+          await cortex.vectorBackend.upsert(memory.id, embedding);
+        }
+      }
+    } catch (e: any) {
+      log.warn({ error: e.message }, 'Timeline conflict demo seed created without full vector indexing');
+    }
+
+    return {
+      ok: true,
+      agent_id: agentId,
+      current_candidate_id: newer.id,
+      history_candidate_id: older.id,
+    };
+  });
+
+  // Dev helper: create a non-timeline conflict review pair for manual review UX testing.
+  app.post('/api/v1/system/seed-conflict-review-demo', async (req, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      reply.code(403);
+      return { error: 'Demo seed endpoint is disabled in production' };
+    }
+
+    const agentId = 'demo-conflict-review';
+    ensureAgent(agentId);
+
+    const left = insertMemory({
+      layer: 'core',
+      category: 'fact',
+      content: 'User only works on-site and never accepts remote work.',
+      agent_id: agentId,
+      confidence: 0.83,
+      importance: 0.74,
+      decay_score: 0.93,
+      source: 'demo:conflict-review-seed',
+    });
+    const right = insertMemory({
+      layer: 'core',
+      category: 'fact',
+      content: 'User works fully remote and does not go on-site.',
+      agent_id: agentId,
+      confidence: 0.81,
+      importance: 0.74,
+      decay_score: 0.93,
+      source: 'demo:conflict-review-seed',
+    });
+
+    updateMemory(left.id, {
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_reason: 'contradiction_llm',
+        audit_kind: 'conflict_needs_review',
+        audit_conflict_with: [right.id],
+        audit_decision: 'needs_review',
+        audit_decision_reason: 'two claims conflict directly and cannot be ordered on a simple timeline',
+        audit_at: new Date().toISOString(),
+        audit_version: 1,
+        demo_seed: 'conflict_needs_review',
+      }),
+    });
+    updateMemory(right.id, {
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_reason: 'contradiction_llm',
+        audit_kind: 'conflict_needs_review',
+        audit_conflict_with: [left.id],
+        audit_decision: 'needs_review',
+        audit_decision_reason: 'two claims conflict directly and cannot be ordered on a simple timeline',
+        audit_at: new Date().toISOString(),
+        audit_version: 1,
+        demo_seed: 'conflict_needs_review',
+      }),
+    });
+
+    try {
+      for (const memory of [left, right]) {
+        const embedding = await cortex.embeddingProvider.embed(memory.content);
+        if (embedding.length > 0) {
+          await cortex.vectorBackend.upsert(memory.id, embedding);
+        }
+      }
+    } catch (e: any) {
+      log.warn({ error: e.message }, 'Conflict review demo seed created without full vector indexing');
+    }
+
+    return {
+      ok: true,
+      agent_id: agentId,
+      review_memory_ids: [left.id, right.id],
+    };
   });
 }

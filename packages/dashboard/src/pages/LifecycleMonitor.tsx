@@ -137,6 +137,12 @@ export default function LifecycleMonitor() {
       'compress': t('lifecycle.compressLabel') || '📐 压缩',
       'preference_extracted': t('lifecycle.phasePreferenceExtraction') || '🪄 偏好提取',
       'preference_duplicate_flagged': t('lifecycle.phasePreferenceDuplicateAudit') || '⚑ 重复偏好打标',
+      'preference_duplicate_resolved': '✓ 重复偏好处理',
+      'preference_duplicate_resolution_rolled_back': '↩ 重复偏好回滚',
+      'timeline_update_resolved': '✓ 时间线处理',
+      'timeline_update_resolution_rolled_back': '↩ 时间线回滚',
+      'conflict_review_resolved': '✓ 冲突人工确认',
+      'conflict_review_resolution_rolled_back': '↩ 冲突回滚',
       'contradiction_audit_flagged': t('lifecycle.auditLabel') || '⚑ 审计打标',
     };
     return map[action] || action;
@@ -152,6 +158,12 @@ export default function LifecycleMonitor() {
       'compress': 'rgba(168,85,247,0.7)',
       'preference_extracted': 'rgba(45,212,191,0.75)',
       'preference_duplicate_flagged': 'rgba(249,115,22,0.75)',
+      'preference_duplicate_resolved': 'rgba(34,197,94,0.75)',
+      'preference_duplicate_resolution_rolled_back': 'rgba(59,130,246,0.75)',
+      'timeline_update_resolved': 'rgba(14,165,233,0.75)',
+      'timeline_update_resolution_rolled_back': 'rgba(96,165,250,0.75)',
+      'conflict_review_resolved': 'rgba(244,114,182,0.75)',
+      'conflict_review_resolution_rolled_back': 'rgba(251,146,60,0.75)',
       'contradiction_audit_flagged': 'rgba(244,114,182,0.75)',
     };
     return map[action] || 'rgba(99,102,241,0.3)';
@@ -198,6 +210,42 @@ export default function LifecycleMonitor() {
         if (d.count != null) return `重复 ${d.count} 条`;
         return '\u2014';
       }
+      if (action === 'preference_duplicate_resolved') {
+        const parts: string[] = [];
+        if (d.count != null) parts.push(`处理 ${d.count} 条`);
+        if (d.keeper_id) parts.push(`keeper ${d.keeper_id}`);
+        return parts.join(' · ') || '\u2014';
+      }
+      if (action === 'preference_duplicate_resolution_rolled_back') {
+        const parts: string[] = [];
+        if (d.count != null) parts.push(`恢复 ${d.count} 条`);
+        if (d.keeper_id) parts.push(`keeper ${d.keeper_id}`);
+        return parts.join(' · ') || '\u2014';
+      }
+      if (action === 'timeline_update_resolved') {
+        const parts: string[] = [];
+        if (d.current_id) parts.push(`当前 ${d.current_id}`);
+        if (d.history_id) parts.push(`历史 ${d.history_id}`);
+        return parts.join(' · ') || '\u2014';
+      }
+      if (action === 'timeline_update_resolution_rolled_back') {
+        const parts: string[] = [];
+        if (d.current_id) parts.push(`当前 ${d.current_id}`);
+        if (d.history_id) parts.push(`历史 ${d.history_id}`);
+        return parts.join(' · ') || '\u2014';
+      }
+      if (action === 'conflict_review_resolved') {
+        const parts: string[] = [];
+        if (d.winner_id) parts.push(`保留 ${d.winner_id}`);
+        if (d.superseded_id) parts.push(`收起 ${d.superseded_id}`);
+        return parts.join(' · ') || '\u2014';
+      }
+      if (action === 'conflict_review_resolution_rolled_back') {
+        const parts: string[] = [];
+        if (d.winner_id) parts.push(`保留 ${d.winner_id}`);
+        if (d.superseded_id) parts.push(`恢复 ${d.superseded_id}`);
+        return parts.join(' · ') || '\u2014';
+      }
       if (d.score) return `分数 ${Number(d.score).toFixed(2)}`;
       if (d.decay_score) return `衰减 ${Number(d.decay_score).toFixed(2)}`;
       if (d.distance) return `距离 ${Number(d.distance).toFixed(3)}`;
@@ -237,6 +285,7 @@ export default function LifecycleMonitor() {
 
   const categoryStats = (lifecycleStats?.categoryStats || []).slice(0, 8);
   const preferenceStats = lifecycleStats?.preferenceExtraction;
+  const contradictionStats = lifecycleStats?.contradictionAudit;
   const recommendation = lifecycleStats?.analysis?.recommendation;
   const topAffectedCategories = recommendation?.topAffectedCategories || [];
 
@@ -437,6 +486,18 @@ export default function LifecycleMonitor() {
               <div className="value">{preferenceStats.duplicateGroups ?? 0}</div>
             </div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceDuplicatesPending') || '待处理重复偏好'}</div>
+              <div className="value">{preferenceStats.duplicatePreferencesPending ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceDuplicatesResolved') || '已处理保留项'}</div>
+              <div className="value">{preferenceStats.duplicatePreferencesResolved ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.preferenceDuplicatesSuperseded') || '已收起重复项'}</div>
+              <div className="value">{preferenceStats.duplicatePreferenceSuperseded ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
               <div className="label">{t('lifecycle.preferenceMissingSources') || '来源异常'}</div>
               <div className="value">{preferenceStats.missingSourceRecent ?? 0}</div>
             </div>
@@ -528,6 +589,30 @@ export default function LifecycleMonitor() {
               {t('lifecycle.qualityHealthy') || '当前未发现明显质量问题'}
             </div>
           )}
+        </div>
+      )}
+
+      {contradictionStats && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <h3 style={{ marginBottom: 12 }}>{t('lifecycle.contradictionClosureTitle') || '冲突审计收口'}</h3>
+          <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))' }}>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.timelineCandidatePairs') || '时间线候选对'}</div>
+              <div className="value">{contradictionStats.timelineCandidatePairs ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.timelineResolvedPairs') || '已确认时间线对'}</div>
+              <div className="value">{contradictionStats.timelineResolvedPairs ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.conflictNeedsReviewPairs') || '待确认冲突对'}</div>
+              <div className="value">{contradictionStats.conflictNeedsReviewPairs ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.conflictResolvedPairs') || '已确认冲突对'}</div>
+              <div className="value">{contradictionStats.conflictResolvedPairs ?? 0}</div>
+            </div>
+          </div>
         </div>
       )}
 

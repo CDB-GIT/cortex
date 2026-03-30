@@ -197,6 +197,77 @@ describe('LifecycleEngine', () => {
     expect(updatedNew.metadata).toContain('possible_conflict');
   });
 
+  it('should annotate timeline update candidates during contradiction audit', async () => {
+    const auditConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        contradictionAudit: {
+          enabled: true,
+          lookbackDays: 30,
+          candidateTopK: 5,
+          maxCandidates: 10,
+          maxLLMCalls: 5,
+          lowConfidenceThreshold: 0.4,
+          minNormalizedSimilarity: 0.7,
+          mode: 'flag_only',
+        },
+      },
+    });
+    const timelineLLM: LLMProvider = {
+      name: 'timeline-mock',
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        action: 'keep_a',
+        reason: 'newer memory describes the current state after a timeline update',
+      })),
+    };
+    const auditVector = createMockVector();
+    (auditVector.search as any).mockResolvedValue([
+      { id: 'timeline-new', distance: 0.1 },
+      { id: 'timeline-old', distance: 0.15 },
+    ]);
+    const auditLifecycle = new LifecycleEngine(timelineLLM, createMockEmbedding(), auditVector, auditConfig);
+
+    insertMemory({
+      id: 'timeline-old',
+      layer: 'core',
+      category: 'fact',
+      content: 'User lives in Tokyo.',
+      agent_id: 'timeline-test',
+      confidence: 0.9,
+      importance: 0.7,
+      decay_score: 0.9,
+    });
+    insertMemory({
+      id: 'timeline-new',
+      layer: 'core',
+      category: 'fact',
+      content: 'User moved to Osaka recently.',
+      agent_id: 'timeline-test',
+      confidence: 0.3,
+      importance: 0.7,
+      decay_score: 0.9,
+      source: 'lifecycle:promotion',
+    });
+
+    await auditLifecycle.run(false, 'manual', 'timeline-test');
+
+    const updatedOld = JSON.parse(getMemoryById('timeline-old')!.metadata!);
+    const updatedNew = JSON.parse(getMemoryById('timeline-new')!.metadata!);
+    expect(updatedOld.audit_kind).toBe('timeline_update_candidate');
+    expect(updatedNew.audit_kind).toBe('timeline_update_candidate');
+    expect(updatedNew.audit_timeline_role).toBe('current_candidate');
+    expect(updatedOld.audit_timeline_role).toBe('history_candidate');
+    expect(updatedNew.audit_current_candidate_id).toBe('timeline-new');
+    expect(updatedOld.audit_history_candidate_id).toBe('timeline-old');
+  });
+
   it('should expose lifecycle stats snapshot', () => {
     const stats = lifecycle.getStats('test');
     expect(stats.layerCounts).toBeDefined();
@@ -345,6 +416,311 @@ describe('LifecycleEngine', () => {
     expect(stats.preferenceExtraction.duplicateSamples[0]?.count).toBeGreaterThanOrEqual(2);
     expect(stats.preferenceExtraction.recentItems.some((item) => item.missingSourceMemoryCount > 0)).toBe(true);
     expect(stats.preferenceExtraction.recentItems.some((item) => item.duplicateCount > 1)).toBe(true);
+  });
+
+  it('should expose duplicate preference resolution counts in lifecycle stats', () => {
+    const prefConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        preferenceExtraction: {
+          enabled: true,
+          lookbackDays: 7,
+          maxNewPreferences: 3,
+          maxLLMCalls: 2,
+          dedupSimilarity: 0.85,
+          duplicateAuditEnabled: true,
+        },
+      },
+    });
+
+    const prefLifecycle = new LifecycleEngine(createMockLLM(), createMockEmbedding(), createMockVector(), prefConfig);
+
+    insertMemory({
+      id: 'pref-pending-1',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers async updates.',
+      agent_id: 'pref-resolution-stats',
+      confidence: 0.82,
+      importance: 0.75,
+      decay_score: 0.9,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        audit_flag: 'duplicate_preference',
+        preference_duplicate_with: ['pref-pending-2'],
+        source_memories: ['pref-source-1'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+    insertMemory({
+      id: 'pref-pending-2',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers async updates!',
+      agent_id: 'pref-resolution-stats',
+      confidence: 0.83,
+      importance: 0.75,
+      decay_score: 0.9,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        audit_flag: 'duplicate_preference',
+        preference_duplicate_with: ['pref-pending-1'],
+        source_memories: ['pref-source-2'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+    insertMemory({
+      id: 'pref-keeper-1',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers batched async updates.',
+      agent_id: 'pref-resolution-stats',
+      confidence: 0.91,
+      importance: 0.79,
+      decay_score: 0.95,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        duplicate_resolution: {
+          resolution_id: 'resolution-1',
+          resolution_type: 'manual_keep_one_supersede_others',
+          role: 'keeper',
+          keeper_id: 'pref-keeper-1',
+          duplicate_group_ids: ['pref-keeper-1', 'pref-superseded-1', 'pref-superseded-2'],
+          superseded_ids: ['pref-superseded-1', 'pref-superseded-2'],
+          resolved_at: new Date().toISOString(),
+        },
+        source_memories: ['pref-source-3'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+    insertMemory({
+      id: 'pref-superseded-1',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers batched async updates!',
+      agent_id: 'pref-resolution-stats',
+      confidence: 0.84,
+      importance: 0.74,
+      decay_score: 0.95,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        duplicate_resolution: {
+          resolution_id: 'resolution-1',
+          resolution_type: 'manual_keep_one_supersede_others',
+          role: 'superseded',
+          keeper_id: 'pref-keeper-1',
+          duplicate_group_ids: ['pref-keeper-1', 'pref-superseded-1', 'pref-superseded-2'],
+          superseded_ids: ['pref-superseded-1', 'pref-superseded-2'],
+          resolved_at: new Date().toISOString(),
+        },
+        source_memories: ['pref-source-4'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+    insertMemory({
+      id: 'pref-superseded-2',
+      layer: 'core',
+      category: 'preference',
+      content: 'User prefers batched async updates。',
+      agent_id: 'pref-resolution-stats',
+      confidence: 0.81,
+      importance: 0.73,
+      decay_score: 0.95,
+      source: 'lifecycle:preference-extraction',
+      metadata: JSON.stringify({
+        duplicate_resolution: {
+          resolution_id: 'resolution-1',
+          resolution_type: 'manual_keep_one_supersede_others',
+          role: 'superseded',
+          keeper_id: 'pref-keeper-1',
+          duplicate_group_ids: ['pref-keeper-1', 'pref-superseded-1', 'pref-superseded-2'],
+          superseded_ids: ['pref-superseded-1', 'pref-superseded-2'],
+          resolved_at: new Date().toISOString(),
+        },
+        source_memories: ['pref-source-5'],
+        extraction_type: 'preference_extraction',
+      }),
+    });
+    getDb().prepare('UPDATE memories SET superseded_by = ? WHERE id IN (?, ?)').run(
+      'pref-keeper-1',
+      'pref-superseded-1',
+      'pref-superseded-2',
+    );
+
+    const stats = prefLifecycle.getStats('pref-resolution-stats');
+    expect(stats.preferenceExtraction.duplicatePreferencesPending).toBeGreaterThanOrEqual(2);
+    expect(stats.preferenceExtraction.duplicatePreferencesResolved).toBeGreaterThanOrEqual(1);
+    expect(stats.preferenceExtraction.duplicatePreferenceSuperseded).toBeGreaterThanOrEqual(2);
+  });
+
+  it('should expose contradiction closure counts in lifecycle stats', () => {
+    const auditConfig = loadConfig({
+      storage: { dbPath: ':memory:', walMode: false },
+      llm: { extraction: { provider: 'none' }, lifecycle: { provider: 'none' } },
+      embedding: { provider: 'none', dimensions: 4 },
+      vectorBackend: { provider: 'sqlite-vec' },
+      markdownExport: { enabled: false, exportMemoryMd: false, debounceMs: 999999 },
+      lifecycle: {
+        promotionThreshold: 0.6,
+        archiveThreshold: 0.2,
+        decayLambda: 0.03,
+        contradictionAudit: {
+          enabled: true,
+          lookbackDays: 30,
+          candidateTopK: 5,
+          maxCandidates: 10,
+          maxLLMCalls: 5,
+          lowConfidenceThreshold: 0.4,
+          minNormalizedSimilarity: 0.7,
+          mode: 'flag_only',
+        },
+      },
+    });
+    const auditLifecycle = new LifecycleEngine(createMockLLM(), createMockEmbedding(), createMockVector(), auditConfig);
+
+    insertMemory({
+      id: 'contradiction-timeline-old',
+      layer: 'core',
+      category: 'fact',
+      content: 'User lives in Tokyo.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_kind: 'timeline_update_candidate',
+        audit_conflict_with: ['contradiction-timeline-new'],
+        audit_current_candidate_id: 'contradiction-timeline-new',
+        audit_history_candidate_id: 'contradiction-timeline-old',
+        audit_timeline_role: 'history_candidate',
+      }),
+    });
+    insertMemory({
+      id: 'contradiction-timeline-new',
+      layer: 'core',
+      category: 'fact',
+      content: 'User moved to Osaka recently.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_kind: 'timeline_update_candidate',
+        audit_conflict_with: ['contradiction-timeline-old'],
+        audit_current_candidate_id: 'contradiction-timeline-new',
+        audit_history_candidate_id: 'contradiction-timeline-old',
+        audit_timeline_role: 'current_candidate',
+      }),
+    });
+    insertMemory({
+      id: 'contradiction-review-a',
+      layer: 'core',
+      category: 'fact',
+      content: 'User only works on-site.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_kind: 'conflict_needs_review',
+        audit_conflict_with: ['contradiction-review-b'],
+      }),
+    });
+    insertMemory({
+      id: 'contradiction-review-b',
+      layer: 'core',
+      category: 'fact',
+      content: 'User works fully remote.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        audit_flag: 'possible_conflict',
+        audit_kind: 'conflict_needs_review',
+        audit_conflict_with: ['contradiction-review-a'],
+      }),
+    });
+    insertMemory({
+      id: 'contradiction-resolved-current',
+      layer: 'core',
+      category: 'fact',
+      content: 'User now lives in Kyoto.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        timeline_resolution: {
+          resolution_id: 'timeline-resolution-1',
+          resolution_type: 'manual_timeline_confirm_current',
+          role: 'current',
+          current_id: 'contradiction-resolved-current',
+          history_id: 'contradiction-resolved-history',
+          resolved_at: new Date().toISOString(),
+        },
+      }),
+    });
+    insertMemory({
+      id: 'contradiction-resolved-history',
+      layer: 'core',
+      category: 'fact',
+      content: 'User lived in Nagoya before.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        timeline_resolution: {
+          resolution_id: 'timeline-resolution-1',
+          resolution_type: 'manual_timeline_confirm_current',
+          role: 'history',
+          current_id: 'contradiction-resolved-current',
+          history_id: 'contradiction-resolved-history',
+          resolved_at: new Date().toISOString(),
+        },
+      }),
+    });
+    getDb().prepare('UPDATE memories SET superseded_by = ? WHERE id = ?').run(
+      'contradiction-resolved-current',
+      'contradiction-resolved-history',
+    );
+    insertMemory({
+      id: 'contradiction-winner',
+      layer: 'core',
+      category: 'fact',
+      content: 'User works hybrid.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        conflict_resolution: {
+          resolution_id: 'conflict-resolution-1',
+          resolution_type: 'manual_conflict_confirm_winner',
+          role: 'winner',
+          winner_id: 'contradiction-winner',
+          superseded_id: 'contradiction-loser',
+          resolved_at: new Date().toISOString(),
+        },
+      }),
+    });
+    insertMemory({
+      id: 'contradiction-loser',
+      layer: 'core',
+      category: 'fact',
+      content: 'User never works remote.',
+      agent_id: 'contradiction-stats',
+      metadata: JSON.stringify({
+        conflict_resolution: {
+          resolution_id: 'conflict-resolution-1',
+          resolution_type: 'manual_conflict_confirm_winner',
+          role: 'superseded',
+          winner_id: 'contradiction-winner',
+          superseded_id: 'contradiction-loser',
+          resolved_at: new Date().toISOString(),
+        },
+      }),
+    });
+    getDb().prepare('UPDATE memories SET superseded_by = ? WHERE id = ?').run(
+      'contradiction-winner',
+      'contradiction-loser',
+    );
+
+    const stats = auditLifecycle.getStats('contradiction-stats');
+    expect(stats.contradictionAudit.timelineCandidatePairs).toBeGreaterThanOrEqual(1);
+    expect(stats.contradictionAudit.timelineResolvedPairs).toBeGreaterThanOrEqual(1);
+    expect(stats.contradictionAudit.conflictNeedsReviewPairs).toBeGreaterThanOrEqual(1);
+    expect(stats.contradictionAudit.conflictResolvedPairs).toBeGreaterThanOrEqual(1);
   });
 
   it('should flag duplicate preferences in flag-only mode', async () => {
