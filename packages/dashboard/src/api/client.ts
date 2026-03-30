@@ -126,6 +126,9 @@ export const runLifecycle = (dryRun = false, agentId?: string) =>
 export const previewLifecycle = (agentId?: string) =>
   request(`/lifecycle/preview${agentId ? `?agent_id=${agentId}` : ''}`);
 
+export const getLifecycleStats = (agentId?: string) =>
+  request(`/lifecycle/stats${agentId ? `?agent_id=${agentId}` : ''}`);
+
 export const getLifecycleLogs = (limit = 50, agentId?: string, offset = 0) =>
   request(`/lifecycle/log?limit=${limit}&offset=${offset}${agentId ? `&agent_id=${agentId}` : ''}`);
 

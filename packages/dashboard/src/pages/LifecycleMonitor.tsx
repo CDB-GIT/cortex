@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { getLifecycleLogs, runLifecycle, previewLifecycle, getConfig, listMemories, listAgents } from '../api/client.js';
+import { getLifecycleLogs, runLifecycle, previewLifecycle, getConfig, getLifecycleStats, listAgents } from '../api/client.js';
 import { useI18n } from '../i18n/index.js';
 import { toLocal } from '../utils/time.js';
 
@@ -42,6 +42,7 @@ export default function LifecycleMonitor() {
   const [runResult, setRunResult] = useState<any>(null);
   const [config, setConfig] = useState<any>(null);
   const [layerStats, setLayerStats] = useState<{ working: number; core: number; archive: number }>({ working: 0, core: 0, archive: 0 });
+  const [lifecycleStats, setLifecycleStats] = useState<any>(null);
   const [affectedMemories, setAffectedMemories] = useState<any[]>([]);
   const [showAffected, setShowAffected] = useState(false);
   const [agents, setAgents] = useState<any[]>([]);
@@ -59,13 +60,9 @@ export default function LifecycleMonitor() {
       setLogs(res.items || res);
       setLogTotal(res.total || 0);
     });
-    const agentParam: Record<string, string> = agentId ? { agent_id: agentId } : {};
-    Promise.all([
-      listMemories({ layer: 'working', limit: '1', offset: '0', ...agentParam }),
-      listMemories({ layer: 'core', limit: '1', offset: '0', ...agentParam }),
-      listMemories({ layer: 'archive', limit: '1', offset: '0', ...agentParam }),
-    ]).then(([w, c, a]: any[]) => {
-      setLayerStats({ working: w.total, core: c.total, archive: a.total });
+    getLifecycleStats(agentId || undefined).then((stats: any) => {
+      setLifecycleStats(stats);
+      setLayerStats(stats.layerCounts || { working: 0, core: 0, archive: 0 });
     }).catch(() => {});
   };
 
@@ -199,6 +196,26 @@ export default function LifecycleMonitor() {
     ? (preview.promoted + preview.merged + preview.archived + preview.compressedToCore + preview.expiredWorking)
     : 0;
 
+  const phaseLabel = (key: string) => {
+    const map: Record<string, string> = {
+      cleanExpiredWorking: t('lifecycle.phaseCleanExpired') || '清理过期 Working',
+      promoteToCore: t('lifecycle.phasePromote') || '晋升到 Core',
+      deduplicateCore: t('lifecycle.phaseDeduplicate') || 'Core 去重',
+      archiveStale: t('lifecycle.phaseArchive') || '归档陈旧记忆',
+      compressArchive: t('lifecycle.phaseCompress') || 'Archive 压缩回流',
+      updateDecayScores: t('lifecycle.phaseDecay') || '更新衰减分数',
+      updateRelationDecay: t('lifecycle.phaseRelationDecay') || '关系边衰减',
+      adjustImportanceFromFeedback: t('lifecycle.phaseFeedback') || '反馈调权',
+      synthesizeProfiles: t('lifecycle.phaseProfile') || '画像合成',
+      cleanAccessLogs: t('lifecycle.phaseAccessLogs') || '清理访问日志',
+    };
+    return map[key] || key;
+  };
+
+  const categoryStats = (lifecycleStats?.categoryStats || []).slice(0, 8);
+  const recommendation = lifecycleStats?.analysis?.recommendation;
+  const topAffectedCategories = recommendation?.topAffectedCategories || [];
+
   return (
     <div>
       <h1 className="page-title">{t('lifecycle.title')}</h1>
@@ -254,6 +271,125 @@ export default function LifecycleMonitor() {
           })}
         </div>
       </div>
+
+      {lifecycleStats && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <h3 style={{ marginBottom: 12 }}>{t('lifecycle.observabilityTitle') || '运行观测'}</h3>
+          <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', marginBottom: 12 }}>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.workingCandidates') || '待晋升 Working'}</div>
+              <div className="value">{lifecycleStats.workingPromotionCandidates ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.archiveCandidates') || '待归档 Core'}</div>
+              <div className="value">{lifecycleStats.archiveCandidates ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.lowConfidence') || '低置信度记忆'}</div>
+              <div className="value">{lifecycleStats.lowConfidenceCount ?? 0}</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.lowConfidenceThreshold') || '低置信度阈值'}</div>
+              <div className="value">{lifecycleStats.thresholds?.lowConfidenceThreshold ?? 0.4}</div>
+            </div>
+          </div>
+          {categoryStats.length > 0 && (
+            <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+              <table style={{ fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th>{t('lifecycle.categoryCol') || '分类'}</th>
+                    <th>{t('lifecycle.totalMemories') || '总数'}</th>
+                    <th>{t('lifecycle.archiveCandidates') || '待归档'}</th>
+                    <th>{t('lifecycle.lowConfidence') || '低置信度'}</th>
+                    <th>{t('lifecycle.avgDecay') || '平均衰减'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {categoryStats.map((row: any) => (
+                    <tr key={row.category}>
+                      <td style={{ whiteSpace: 'nowrap' }}>{row.category}</td>
+                      <td>{row.total}</td>
+                      <td>{row.archiveCandidates}</td>
+                      <td>{row.lowConfidence}</td>
+                      <td>{(row.avgDecayScore ?? 0).toFixed(3)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {lifecycleStats?.analysis && (
+        <div className="card" style={{ marginBottom: 16, borderColor: recommendation?.shouldAdjust ? 'var(--color-warning)' : 'var(--color-success)' }}>
+          <h3 style={{ marginBottom: 12 }}>{t('lifecycle.tuningTitle') || '参数建议'}</h3>
+          <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', marginBottom: 12 }}>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.currentScenario') || '当前配置'}</div>
+              <div className="value">{lifecycleStats.analysis.current.archiveCandidates}</div>
+              <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>
+                archiveThreshold={lifecycleStats.analysis.current.archiveThreshold}, lambda={lifecycleStats.analysis.current.decayLambda}
+              </div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.suggestedScenario') || '建议配置'}</div>
+              <div className="value">{lifecycleStats.analysis.suggested.archiveCandidates}</div>
+              <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>
+                archiveThreshold={lifecycleStats.analysis.suggested.archiveThreshold}, lambda={lifecycleStats.analysis.suggested.decayLambda}
+              </div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.currentArchiveRate') || '当前归档率'}</div>
+              <div className="value">{((lifecycleStats.analysis.current.archiveRate ?? 0) * 100).toFixed(1)}%</div>
+            </div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div className="label">{t('lifecycle.recommendationDecision') || '建议结论'}</div>
+              <div className="value" style={{ color: recommendation?.shouldAdjust ? 'var(--color-warning)' : 'var(--color-success)', fontSize: 18 }}>
+                {recommendation?.shouldAdjust
+                  ? (t('lifecycle.adjustRecommended') || '建议调整')
+                  : (t('lifecycle.keepCurrent') || '保持当前')}
+              </div>
+            </div>
+          </div>
+
+          {recommendation?.reasons?.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {recommendation.reasons.map((reason: string, idx: number) => (
+                <div key={idx} style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
+                  {reason}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {topAffectedCategories.length > 0 && (
+            <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+              <table style={{ fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th>{t('lifecycle.categoryCol') || '分类'}</th>
+                    <th>{t('lifecycle.currentScenario') || '当前配置'}</th>
+                    <th>{t('lifecycle.suggestedScenario') || '建议配置'}</th>
+                    <th>{t('lifecycle.improvementCol') || '改善'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topAffectedCategories.map((row: any) => (
+                    <tr key={row.category}>
+                      <td style={{ whiteSpace: 'nowrap' }}>{row.category}</td>
+                      <td>{row.currentArchiveCandidates}</td>
+                      <td>{row.projectedArchiveCandidates}</td>
+                      <td>{row.improvement > 0 ? `-${row.improvement}` : row.improvement}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Agent selector + Actions */}
       <div className="toolbar" style={{ flexWrap: 'wrap' }}>
@@ -379,8 +515,39 @@ export default function LifecycleMonitor() {
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.merged')}</div><div className="value">{runResult.merged}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.archived')}</div><div className="value">{runResult.archived}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.compressed')}</div><div className="value">{runResult.compressedToCore}</div></div>
+            <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.llmCalls') || 'LLM 调用'}</div><div className="value">{runResult.observability?.llm?.totalCalls ?? 0}</div></div>
             <div className="stat-card" style={{ background: 'var(--color-base)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}><div className="label">{t('lifecycle.duration')}</div><div className="value">{runResult.durationMs}ms</div></div>
           </div>
+          {runResult.observability?.phases?.length > 0 && (
+            <div style={{ marginTop: 12, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+              <table style={{ fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th>{t('lifecycle.phaseCol') || '阶段'}</th>
+                    <th>{t('lifecycle.processedCol') || '处理数'}</th>
+                    <th>{t('lifecycle.duration')} </th>
+                    <th>{t('lifecycle.details') || '详情'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runResult.observability.phases.map((phase: any) => (
+                    <tr key={phase.key}>
+                      <td style={{ whiteSpace: 'nowrap' }}>{phaseLabel(phase.key)}</td>
+                      <td>{phase.skipped ? '—' : phase.processed}</td>
+                      <td>{phase.durationMs}ms</td>
+                      <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {phase.skipped
+                          ? (phase.details?.reason || 'skipped')
+                          : phase.details
+                            ? JSON.stringify(phase.details)
+                            : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           {runResult.errors?.length > 0 && (
             <div style={{ marginTop: 12, color: 'var(--color-danger)' }}>
               {t('lifecycle.errors')}: {runResult.errors.join(', ')}

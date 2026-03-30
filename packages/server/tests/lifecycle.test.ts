@@ -86,6 +86,8 @@ describe('LifecycleEngine', () => {
     expect(report.durationMs).toBeGreaterThanOrEqual(0);
     expect(report.startedAt).toBeTruthy();
     expect(report.completedAt).toBeTruthy();
+    expect(Array.isArray(report.observability.phases)).toBe(true);
+    expect(report.observability.phases.length).toBeGreaterThan(0);
   });
 
   it('should update decay scores', async () => {
@@ -112,5 +114,19 @@ describe('LifecycleEngine', () => {
     expect(typeof report.compressedToCore).toBe('number');
     expect(typeof report.expiredWorking).toBe('number');
     expect(Array.isArray(report.errors)).toBe(true);
+    expect(report.observability.llm).toBeDefined();
+    expect(Array.isArray(report.observability.phases)).toBe(true);
+    expect(report.observability.phases.some((p) => p.key === 'updateDecayScores')).toBe(true);
+  });
+
+  it('should expose lifecycle stats snapshot', () => {
+    const stats = lifecycle.getStats('test');
+    expect(stats.layerCounts).toBeDefined();
+    expect(typeof stats.archiveCandidates).toBe('number');
+    expect(typeof stats.lowConfidenceCount).toBe('number');
+    expect(Array.isArray(stats.categoryStats)).toBe(true);
+    expect(stats.analysis).toBeDefined();
+    expect(typeof stats.analysis.recommendation.shouldAdjust).toBe('boolean');
+    expect(Array.isArray(stats.analysis.recommendation.reasons)).toBe(true);
   });
 });

@@ -169,6 +169,23 @@ describe('API Integration', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.payload);
       expect(typeof body.promoted).toBe('number');
+      expect(Array.isArray(body.observability?.phases)).toBe(true);
+    });
+  });
+
+  describe('GET /api/v1/lifecycle/stats', () => {
+    it('should return lifecycle stats snapshot', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/v1/lifecycle/stats',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.payload);
+      expect(body.layerCounts).toBeDefined();
+      expect(typeof body.archiveCandidates).toBe('number');
+      expect(Array.isArray(body.categoryStats)).toBe(true);
+      expect(body.analysis).toBeDefined();
+      expect(typeof body.analysis.recommendation.shouldAdjust).toBe('boolean');
     });
   });
 

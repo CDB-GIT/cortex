@@ -55,12 +55,118 @@ export interface LifecycleReport {
   compressedToCore: number;
   expiredWorking: number;
   importanceAdjusted?: number;
+  decayUpdated?: number;
+  relationDecayUpdated?: number;
+  profilesSynthesized?: number;
+  accessLogsCleaned?: number;
   indexRebuilt: boolean;
   errors: string[];
   startedAt: string;
   completedAt: string;
   durationMs: number;
   affectedMemories?: AffectedMemory[];
+  observability: LifecycleObservability;
+}
+
+export interface LifecyclePhaseStat {
+  key: string;
+  processed: number;
+  durationMs: number;
+  skipped?: boolean;
+  details?: Record<string, number | string | boolean | null | undefined>;
+}
+
+export interface LifecycleObservability {
+  phases: LifecyclePhaseStat[];
+  llm: {
+    totalCalls: number;
+    compressionCalls: number;
+    profileSynthesisCalls: number;
+  };
+}
+
+export interface LifecycleCategoryStat {
+  category: string;
+  total: number;
+  archiveCandidates: number;
+  lowConfidence: number;
+  avgDecayScore: number;
+  minDecayScore: number;
+  maxDecayScore: number;
+}
+
+export interface LifecycleStatsSnapshot {
+  generatedAt: string;
+  thresholds: {
+    promotionThreshold: number;
+    archiveThreshold: number;
+    decayLambda: number;
+    lowConfidenceThreshold: number;
+  };
+  layerCounts: {
+    working: number;
+    core: number;
+    archive: number;
+  };
+  workingPromotionCandidates: number;
+  archiveCandidates: number;
+  lowConfidenceCount: number;
+  categoryStats: LifecycleCategoryStat[];
+  analysis: LifecycleAnalysis;
+}
+
+export interface LifecycleScenarioStat {
+  archiveThreshold: number;
+  decayLambda: number;
+  archiveCandidates: number;
+  archiveRate: number;
+}
+
+export interface LifecycleCategoryRecommendation {
+  category: string;
+  currentArchiveCandidates: number;
+  projectedArchiveCandidates: number;
+  improvement: number;
+}
+
+export interface LifecycleAnalysis {
+  current: LifecycleScenarioStat;
+  suggested: LifecycleScenarioStat;
+  recommendation: {
+    shouldAdjust: boolean;
+    suggestedArchiveThreshold: number;
+    suggestedDecayLambda: number;
+    reasons: string[];
+    topAffectedCategories: LifecycleCategoryRecommendation[];
+  };
+}
+
+interface LifecycleLLMTracker {
+  totalCalls: number;
+  compressionCalls: number;
+  profileSynthesisCalls: number;
+}
+
+interface CompressionResult {
+  compressedToCore: number;
+  groups: number;
+  llmCalls: number;
+}
+
+interface ProfileSynthesisResult {
+  agentsProcessed: number;
+  llmCalls: number;
+}
+
+interface LifecycleStatsMemoryRow {
+  layer: MemoryLayer;
+  category: string;
+  importance: number;
+  access_count: number;
+  last_accessed: string | null;
+  created_at: string;
+  decay_score: number;
+  is_pinned: number;
 }
 
 // In-memory profile cache: agentId -> { text, timestamp }
@@ -91,6 +197,10 @@ export class LifecycleEngine {
         startedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
         durationMs: 0,
+        observability: {
+          phases: [],
+          llm: { totalCalls: 0, compressionCalls: 0, profileSynthesisCalls: 0 },
+        },
       };
     }
 
@@ -109,64 +219,140 @@ export class LifecycleEngine {
       completedAt: '',
       durationMs: 0,
       affectedMemories: dryRun ? [] : undefined,
+      observability: {
+        phases: [],
+        llm: { totalCalls: 0, compressionCalls: 0, profileSynthesisCalls: 0 },
+      },
+    };
+    const llmTracker: LifecycleLLMTracker = {
+      totalCalls: 0,
+      compressionCalls: 0,
+      profileSynthesisCalls: 0,
+    };
+    const recordPhase = (
+      key: string,
+      startedAtMs: number,
+      processed: number,
+      details?: Record<string, number | string | boolean | null | undefined>,
+      skipped = false,
+    ) => {
+      report.observability.phases.push({
+        key,
+        processed,
+        durationMs: Date.now() - startedAtMs,
+        skipped,
+        details,
+      });
     };
 
     try {
       // Phase 1: Clean expired Working memories
       log.info('Phase 1: cleanExpiredWorking');
-      report.expiredWorking = await this.cleanExpiredWorking(dryRun, report.affectedMemories, agentId);
+      {
+        const phaseStart = Date.now();
+        report.expiredWorking = await this.cleanExpiredWorking(dryRun, report.affectedMemories, agentId);
+        recordPhase('cleanExpiredWorking', phaseStart, report.expiredWorking);
+      }
 
       // Phase 2: Working -> Core promotion
       log.info('Phase 2: promoteToCore');
-      report.promoted = await this.promoteToCore(dryRun, report.affectedMemories, agentId);
+      {
+        const phaseStart = Date.now();
+        report.promoted = await this.promoteToCore(dryRun, report.affectedMemories, agentId);
+        recordPhase('promoteToCore', phaseStart, report.promoted);
+      }
 
       // Phase 3: Core dedup and merge (skip in dry-run — O(N) embedding calls)
       if (!dryRun) {
         log.info('Phase 3: deduplicateCore');
+        const phaseStart = Date.now();
         report.merged = await this.deduplicateCore(dryRun, agentId);
+        recordPhase('deduplicateCore', phaseStart, report.merged);
       } else {
         log.info('Phase 3: deduplicateCore (skipped in dry-run)');
+        const phaseStart = Date.now();
+        recordPhase('deduplicateCore', phaseStart, 0, { reason: 'dry_run' }, true);
       }
 
       // Phase 4: Core -> Archive demotion
       log.info('Phase 4: archiveStale');
-      report.archived = await this.archiveStale(dryRun, report.affectedMemories, agentId);
+      {
+        const phaseStart = Date.now();
+        report.archived = await this.archiveStale(dryRun, report.affectedMemories, agentId);
+        recordPhase('archiveStale', phaseStart, report.archived);
+      }
 
       // Phase 5: Archive -> Core compression (never lose data)
       log.info('Phase 5: compressArchive');
-      report.compressedToCore = await this.compressArchive(dryRun, agentId);
+      {
+        const phaseStart = Date.now();
+        const compression = await this.compressArchive(dryRun, agentId, llmTracker);
+        report.compressedToCore = compression.compressedToCore;
+        recordPhase('compressArchive', phaseStart, compression.compressedToCore, {
+          groups: compression.groups,
+          llmCalls: compression.llmCalls,
+        });
+      }
 
       // Phase 6: Update decay scores
       log.info('Phase 6: updateDecayScores');
-      await this.updateDecayScores();
+      {
+        const phaseStart = Date.now();
+        const updated = await this.updateDecayScores();
+        report.decayUpdated = updated;
+        recordPhase('updateDecayScores', phaseStart, updated);
+      }
 
       // Phase 6b: Decay stale relation confidences
       log.info('Phase 6b: updateRelationDecay');
-      await this.updateRelationDecay();
+      {
+        const phaseStart = Date.now();
+        const updated = await this.updateRelationDecay();
+        report.relationDecayUpdated = updated;
+        recordPhase('updateRelationDecay', phaseStart, updated);
+      }
 
       // Phase 6c: Adjust importance from memory feedback (self-improvement)
       if (this.config.selfImprovement?.enabled !== false && !dryRun) {
         log.info('Phase 6c: adjustImportanceFromFeedback');
+        const phaseStart = Date.now();
         try {
           const adjusted = await this.adjustImportanceFromFeedback(agentId);
           report.importanceAdjusted = adjusted;
+          recordPhase('adjustImportanceFromFeedback', phaseStart, adjusted);
         } catch (e: any) {
           log.warn({ error: e.message }, 'Self-improvement feedback adjustment failed');
           report.errors.push(`Phase 6c: ${e.message}`);
+          recordPhase('adjustImportanceFromFeedback', phaseStart, 0, { error: e.message });
         }
+      } else {
+        const phaseStart = Date.now();
+        recordPhase('adjustImportanceFromFeedback', phaseStart, 0, {
+          reason: dryRun ? 'dry_run' : 'disabled',
+        }, true);
       }
 
       // Phase 7: Synthesize user profiles (skip in dry-run)
       if (!dryRun) {
+        const phaseStart = Date.now();
         try {
-          await this.synthesizeProfiles(agentId);
+          const synthesis = await this.synthesizeProfiles(agentId, llmTracker);
+          report.profilesSynthesized = synthesis.agentsProcessed;
+          recordPhase('synthesizeProfiles', phaseStart, synthesis.agentsProcessed, {
+            llmCalls: synthesis.llmCalls,
+          });
         } catch (e: any) {
           log.warn({ error: e.message }, 'Profile synthesis failed during lifecycle run');
+          recordPhase('synthesizeProfiles', phaseStart, 0, { error: e.message });
         }
+      } else {
+        const phaseStart = Date.now();
+        recordPhase('synthesizeProfiles', phaseStart, 0, { reason: 'dry_run' }, true);
       }
 
       // Phase 8: Clean old access logs (keep 30 days)
       log.info('Phase 8: cleanAccessLogs');
+      const phaseStart = Date.now();
       try {
         const db = getDb();
         const cutoff = new Date(Date.now() - 30 * 86400_000).toISOString();
@@ -174,9 +360,11 @@ export class LifecycleEngine {
         if (result.changes > 0) {
           log.info({ deleted: result.changes }, 'Cleaned old access logs');
         }
-        (report as any).accessLogsCleaned = result.changes;
+        report.accessLogsCleaned = result.changes;
+        recordPhase('cleanAccessLogs', phaseStart, result.changes);
       } catch (e: any) {
         log.warn({ error: e.message }, 'Access log cleanup failed');
+        recordPhase('cleanAccessLogs', phaseStart, 0, { error: e.message });
       }
 
       report.indexRebuilt = true;
@@ -190,6 +378,7 @@ export class LifecycleEngine {
 
     report.completedAt = new Date().toISOString();
     report.durationMs = Date.now() - start;
+    report.observability.llm = { ...llmTracker };
 
     if (!dryRun) {
       insertLifecycleLog('lifecycle_run', [], { ...report, trigger, agent_id: agentId || 'all' } as any);
@@ -202,6 +391,113 @@ export class LifecycleEngine {
   /** Preview what the next lifecycle run would do */
   async preview(agentId?: string): Promise<LifecycleReport> {
     return this.run(true, 'preview', agentId);
+  }
+
+  getStats(agentId?: string, lowConfidenceThreshold = 0.4): LifecycleStatsSnapshot {
+    const db = getDb();
+    const agentFilter = agentId ? ' AND agent_id = ?' : '';
+    const params = agentId ? [agentId] : [];
+    const suggestedArchiveThreshold = 0.15;
+    const suggestedDecayLambda = 0.02;
+
+    const layerRows = db.prepare(`
+      SELECT layer, COUNT(*) as count
+      FROM memories
+      WHERE superseded_by IS NULL${agentFilter}
+      GROUP BY layer
+    `).all(...params) as { layer: MemoryLayer; count: number }[];
+    const layerCounts = { working: 0, core: 0, archive: 0 };
+    for (const row of layerRows) {
+      if (row.layer in layerCounts) {
+        layerCounts[row.layer] = row.count;
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const workingPromotionCandidates = (db.prepare(`
+      SELECT COUNT(*) as count
+      FROM memories
+      WHERE layer = 'working'
+        AND superseded_by IS NULL
+        AND created_at < ?
+        AND (expires_at IS NULL OR expires_at > ?)${agentFilter}
+    `).get(twentyFourHoursAgo, nowIso, ...params) as { count: number }).count;
+
+    const archiveCandidates = (db.prepare(`
+      SELECT COUNT(*) as count
+      FROM memories
+      WHERE layer = 'core'
+        AND superseded_by IS NULL
+        AND is_pinned = 0
+        AND decay_score < ?${agentFilter}
+    `).get(this.config.lifecycle.archiveThreshold, ...params) as { count: number }).count;
+
+    const lowConfidenceCount = (db.prepare(`
+      SELECT COUNT(*) as count
+      FROM memories
+      WHERE superseded_by IS NULL
+        AND confidence < ?${agentFilter}
+    `).get(lowConfidenceThreshold, ...params) as { count: number }).count;
+
+    const activeMemories = db.prepare(`
+      SELECT layer, category, importance, access_count, last_accessed, created_at, decay_score, is_pinned
+      FROM memories
+      WHERE superseded_by IS NULL${agentFilter}
+    `).all(...params) as LifecycleStatsMemoryRow[];
+
+    const categoryStats = db.prepare(`
+      SELECT
+        category,
+        COUNT(*) as total,
+        SUM(CASE WHEN layer = 'core' AND is_pinned = 0 AND decay_score < ? THEN 1 ELSE 0 END) as archiveCandidates,
+        SUM(CASE WHEN confidence < ? THEN 1 ELSE 0 END) as lowConfidence,
+        AVG(decay_score) as avgDecayScore,
+        MIN(decay_score) as minDecayScore,
+        MAX(decay_score) as maxDecayScore
+      FROM memories
+      WHERE superseded_by IS NULL${agentFilter}
+      GROUP BY category
+      ORDER BY archiveCandidates DESC, lowConfidence DESC, total DESC, category ASC
+    `).all(this.config.lifecycle.archiveThreshold, lowConfidenceThreshold, ...params) as Array<{
+      category: string;
+      total: number;
+      archiveCandidates: number | null;
+      lowConfidence: number | null;
+      avgDecayScore: number | null;
+      minDecayScore: number | null;
+      maxDecayScore: number | null;
+    }>;
+
+    return {
+      generatedAt: new Date().toISOString(),
+      thresholds: {
+        promotionThreshold: this.config.lifecycle.promotionThreshold,
+        archiveThreshold: this.config.lifecycle.archiveThreshold,
+        decayLambda: this.config.lifecycle.decayLambda,
+        lowConfidenceThreshold,
+      },
+      layerCounts,
+      workingPromotionCandidates,
+      archiveCandidates,
+      lowConfidenceCount,
+      categoryStats: categoryStats.map((row) => ({
+        category: row.category,
+        total: row.total,
+        archiveCandidates: row.archiveCandidates ?? 0,
+        lowConfidence: row.lowConfidence ?? 0,
+        avgDecayScore: Number((row.avgDecayScore ?? 0).toFixed(3)),
+        minDecayScore: Number((row.minDecayScore ?? 0).toFixed(3)),
+        maxDecayScore: Number((row.maxDecayScore ?? 0).toFixed(3)),
+      })),
+      analysis: this.buildLifecycleAnalysis(
+        activeMemories,
+        this.config.lifecycle.archiveThreshold,
+        this.config.lifecycle.decayLambda,
+        suggestedArchiveThreshold,
+        suggestedDecayLambda,
+      ),
+    };
   }
 
   private async cleanExpiredWorking(dryRun: boolean, affected?: AffectedMemory[], agentId?: string): Promise<number> {
@@ -350,6 +646,109 @@ export class LifecycleEngine {
     return (baseImportance * 0.3 + accessFactor * 0.4 + importanceFactor * 0.3);
   }
 
+  private computeDecayScoreForStats(entry: LifecycleStatsMemoryRow, lambda: number): number {
+    const baseImp = BASE_IMPORTANCE[entry.category] || 0.5;
+    const maxAccess = 20;
+    const accessFreq = Math.log(1 + entry.access_count) / Math.log(1 + maxAccess);
+    const lastAccessed = entry.last_accessed
+      ? new Date(entry.last_accessed).getTime()
+      : new Date(entry.created_at).getTime();
+    const daysSinceAccess = (Date.now() - lastAccessed) / 86_400_000;
+    const recencyFactor = Math.exp(-lambda * daysSinceAccess);
+    const decayScore = Math.min(1.0, baseImp * 0.3 + baseImp * accessFreq * 0.3 + recencyFactor * entry.importance * 0.4);
+    return Math.max(0, decayScore);
+  }
+
+  private buildLifecycleAnalysis(
+    memories: LifecycleStatsMemoryRow[],
+    currentArchiveThreshold: number,
+    currentDecayLambda: number,
+    suggestedArchiveThreshold: number,
+    suggestedDecayLambda: number,
+  ): LifecycleAnalysis {
+    const archiveableCore = memories.filter((m) => m.layer === 'core' && m.is_pinned === 0);
+    const coreCount = archiveableCore.length;
+    const currentArchiveCandidates = archiveableCore.filter((m) => m.decay_score < currentArchiveThreshold).length;
+
+    const projectedByCategory = new Map<string, { current: number; projected: number }>();
+    let projectedArchiveCandidates = 0;
+
+    for (const memory of archiveableCore) {
+      const currentFlag = memory.decay_score < currentArchiveThreshold ? 1 : 0;
+      const projectedScore = this.computeDecayScoreForStats(memory, suggestedDecayLambda);
+      const projectedFlag = projectedScore < suggestedArchiveThreshold ? 1 : 0;
+
+      if (projectedFlag) projectedArchiveCandidates++;
+
+      const stats = projectedByCategory.get(memory.category) || { current: 0, projected: 0 };
+      stats.current += currentFlag;
+      stats.projected += projectedFlag;
+      projectedByCategory.set(memory.category, stats);
+    }
+
+    const topAffectedCategories = Array.from(projectedByCategory.entries())
+      .map(([category, stats]) => ({
+        category,
+        currentArchiveCandidates: stats.current,
+        projectedArchiveCandidates: stats.projected,
+        improvement: stats.current - stats.projected,
+      }))
+      .filter((row) => row.currentArchiveCandidates > 0 || row.projectedArchiveCandidates > 0)
+      .sort((a, b) => {
+        if (b.improvement !== a.improvement) return b.improvement - a.improvement;
+        if (b.currentArchiveCandidates !== a.currentArchiveCandidates) return b.currentArchiveCandidates - a.currentArchiveCandidates;
+        return a.category.localeCompare(b.category);
+      })
+      .slice(0, 5);
+
+    const currentArchiveRate = coreCount > 0 ? currentArchiveCandidates / coreCount : 0;
+    const projectedArchiveRate = coreCount > 0 ? projectedArchiveCandidates / coreCount : 0;
+    const reasons: string[] = [];
+
+    if (currentArchiveCandidates > projectedArchiveCandidates) {
+      reasons.push(
+        `Current settings would archive ${currentArchiveCandidates} core memories; the suggested settings would archive ${projectedArchiveCandidates}.`,
+      );
+    }
+
+    const semanticCategories = topAffectedCategories
+      .filter((row) => row.improvement > 0 && ['fact', 'insight', 'context', 'project_state', 'decision'].includes(row.category))
+      .map((row) => row.category);
+    if (semanticCategories.length > 0) {
+      reasons.push(`Most avoidable archive pressure is concentrated in: ${semanticCategories.join(', ')}.`);
+    }
+
+    if (currentArchiveRate >= 0.2) {
+      reasons.push(`Current archive rate is ${(currentArchiveRate * 100).toFixed(1)}% of unpinned core memories, which is relatively aggressive.`);
+    }
+
+    if (reasons.length === 0) {
+      reasons.push('Current archive pressure is not high enough to justify a threshold change yet.');
+    }
+
+    return {
+      current: {
+        archiveThreshold: currentArchiveThreshold,
+        decayLambda: currentDecayLambda,
+        archiveCandidates: currentArchiveCandidates,
+        archiveRate: Number(currentArchiveRate.toFixed(3)),
+      },
+      suggested: {
+        archiveThreshold: suggestedArchiveThreshold,
+        decayLambda: suggestedDecayLambda,
+        archiveCandidates: projectedArchiveCandidates,
+        archiveRate: Number(projectedArchiveRate.toFixed(3)),
+      },
+      recommendation: {
+        shouldAdjust: currentArchiveCandidates > projectedArchiveCandidates && (currentArchiveRate >= 0.2 || topAffectedCategories.some((row) => row.improvement >= 2)),
+        suggestedArchiveThreshold,
+        suggestedDecayLambda,
+        reasons,
+        topAffectedCategories,
+      },
+    };
+  }
+
   private async deduplicateCore(dryRun: boolean, agentId?: string): Promise<number> {
     const db = getDb();
     const agentFilter = agentId ? ' AND agent_id = ?' : '';
@@ -464,8 +863,10 @@ export class LifecycleEngine {
     return archived;
   }
 
-  private async compressArchive(dryRun: boolean, agentId?: string): Promise<number> {
-    if (!this.config.layers.archive.compressBackToCore) return 0;
+  private async compressArchive(dryRun: boolean, agentId?: string, llmTracker?: LifecycleLLMTracker): Promise<CompressionResult> {
+    if (!this.config.layers.archive.compressBackToCore) {
+      return { compressedToCore: 0, groups: 0, llmCalls: 0 };
+    }
 
     const db = getDb();
     const agentFilter = agentId ? ' AND agent_id = ?' : '';
@@ -479,7 +880,10 @@ export class LifecycleEngine {
         AND superseded_by IS NULL${agentFilter}
     `).all(nowIso, ...params) as Memory[];
 
-    if (expired.length === 0) return 0;
+    if (expired.length === 0) return { compressedToCore: 0, groups: 0, llmCalls: 0 };
+
+    let groupsCount = 0;
+    let llmCalls = 0;
 
     if (!dryRun) {
       // Group by agent_id + category to prevent cross-agent memory mixing
@@ -490,6 +894,7 @@ export class LifecycleEngine {
         list.push(e);
         groups.set(key, list);
       }
+      groupsCount = groups.size;
 
       const allOriginalIds: string[] = [];
 
@@ -526,6 +931,11 @@ export class LifecycleEngine {
         const contents = items.map(e => `- ${e.content}`).join('\n');
         let compressed: string;
         try {
+          llmCalls++;
+          if (llmTracker) {
+            llmTracker.totalCalls++;
+            llmTracker.compressionCalls++;
+          }
           compressed = await this.llm.complete(
             `Compress these ${category} memories into 1-3 concise sentences. Preserve all key facts. Same language as input.\n\n${contents.slice(0, 3000)}`,
             { maxTokens: 200, temperature: 0.2 },
@@ -571,10 +981,10 @@ export class LifecycleEngine {
       });
     }
 
-    return expired.length;
+    return { compressedToCore: expired.length, groups: groupsCount, llmCalls };
   }
 
-  private async updateDecayScores(): Promise<void> {
+  private async updateDecayScores(): Promise<number> {
     const db = getDb();
     const lambda = this.config.lifecycle.decayLambda;
 
@@ -601,6 +1011,7 @@ export class LifecycleEngine {
         stmt.run(Math.max(0, decayScore), m.id);
       }
     })();
+    return memories.length;
   }
 
   /**
@@ -608,7 +1019,7 @@ export class LifecycleEngine {
    * 30-day grace period: only decay relations older than 30 days since last update.
    * Uses exponential decay: decayed = max(0.1, confidence * exp(-lambda * (days - 30)))
    */
-  private async updateRelationDecay(): Promise<void> {
+  private async updateRelationDecay(): Promise<number> {
     const db = getDb();
     const lambda = this.config.lifecycle.decayLambda;
 
@@ -619,6 +1030,7 @@ export class LifecycleEngine {
     const now = Date.now();
     const GRACE_DAYS = 30;
     const stmt = db.prepare('UPDATE relations SET confidence = ? WHERE id = ?');
+    let updated = 0;
 
     db.transaction(() => {
       for (const rel of relations) {
@@ -632,9 +1044,11 @@ export class LifecycleEngine {
 
         if (Math.abs(decayed - rel.confidence) > 0.001) {
           stmt.run(decayed, rel.id);
+          updated++;
         }
       }
     })();
+    return updated;
   }
 
   /**
@@ -761,7 +1175,7 @@ export class LifecycleEngine {
    * Synthesize a compact user profile from Core memories.
    * Called after lifecycle runs, and cached for 24h.
    */
-  async synthesizeProfile(agentId: string): Promise<string> {
+  async synthesizeProfile(agentId: string, llmTracker?: LifecycleLLMTracker): Promise<string> {
     // Check cache first
     const cached = profileCache.get(agentId);
     if (cached && (Date.now() - cached.timestamp) < PROFILE_CACHE_TTL_MS) {
@@ -804,6 +1218,10 @@ export class LifecycleEngine {
 
     let profile: string;
     try {
+      if (llmTracker) {
+        llmTracker.totalCalls++;
+        llmTracker.profileSynthesisCalls++;
+      }
       profile = await this.llm.complete(input, {
         maxTokens: 400,
         temperature: 0.2,
@@ -848,18 +1266,25 @@ export class LifecycleEngine {
    * If agentId is provided, only synthesize for that agent.
    * Otherwise, synthesize for all agents.
    */
-  async synthesizeProfiles(agentId?: string): Promise<void> {
+  async synthesizeProfiles(agentId?: string, llmTracker?: LifecycleLLMTracker): Promise<ProfileSynthesisResult> {
     const db = getDb();
     const agents = agentId
       ? [{ id: agentId }]
-      : (db.prepare('SELECT DISTINCT id FROM agents').all() as { id: string }[]);
+      : (db.prepare('SELECT DISTINCT id FROM agents WHERE memory_disabled = 0').all() as { id: string }[]);
+    let agentsProcessed = 0;
+    let llmCallsBefore = llmTracker?.profileSynthesisCalls ?? 0;
 
     for (const agent of agents) {
       try {
-        await this.synthesizeProfile(agent.id);
+        await this.synthesizeProfile(agent.id, llmTracker);
+        agentsProcessed++;
       } catch (e: any) {
         log.warn({ agent_id: agent.id, error: e.message }, 'Failed to synthesize profile for agent');
       }
     }
+    return {
+      agentsProcessed,
+      llmCalls: (llmTracker?.profileSynthesisCalls ?? llmCallsBefore) - llmCallsBefore,
+    };
   }
 }

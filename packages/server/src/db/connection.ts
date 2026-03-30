@@ -535,6 +535,13 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_memories_agent_pairing ON memories(agent_id, pairing_code);
     `,
   },
+  {
+    name: '015_agent_memory_disabled',
+    sql: `
+      -- Allow disabling memory extraction/synthesis per agent
+      ALTER TABLE agents ADD COLUMN memory_disabled INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export function closeDatabase(): void {

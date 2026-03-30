@@ -16,6 +16,12 @@ export function registerLifecycleRoutes(app: FastifyInstance, cortex: CortexApp)
     return cortex.lifecycle.preview(q.agent_id || undefined);
   });
 
+  // Stats / observability snapshot
+  app.get('/api/v1/lifecycle/stats', async (req) => {
+    const q = req.query as any;
+    return cortex.lifecycle.getStats(q.agent_id || undefined);
+  });
+
   // Get logs
   app.get('/api/v1/lifecycle/log', async (req) => {
     const q = req.query as any;
